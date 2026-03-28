@@ -16,14 +16,25 @@ export default function RegisterPage() {
         if (password !== confirm) { setError("Passwords do not match."); return; }
         if (password.length < 6) { setError("Password must be at least 6 characters."); return; }
         setLoading(true); setError("");
-        try {
-            await API.post("/auth/register", { username, password });
-            navigate("/login");
-        } catch (e) {
-            setError(e.response?.data?.detail || "Registration failed.");
-        } finally { setLoading(false); }
-    };
+       try {
+    const res = await API.post("/auth/register", { username, password });
 
+    if (res.status === 200) {
+        // ✅ SUCCESS
+        navigate("/login");
+    } else {
+        setError("Registration failed.");
+    }
+
+} catch (e) {
+    console.log(e); // 🔥 VERY IMPORTANT for debugging
+
+    setError(
+        e.response?.data?.detail ||
+        e.response?.data?.message ||  // 👈 ADD THIS
+        "Registration failed."
+    );
+}
     return (
         <div className="page" style={{ background: "var(--bg)" }}>
             <div className="card card-sm">
