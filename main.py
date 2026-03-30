@@ -27,3 +27,7 @@ app.include_router(quiz.router, prefix="/quiz", tags=["Quiz"])
 @app.get("/")
 def root():
     return {"message": "QuizGenius API Running 🚀"}
+    # ✅ ADD THIS (IMPORTANT FIX)
+@app.head("/")
+def head_root():
+    return {}
