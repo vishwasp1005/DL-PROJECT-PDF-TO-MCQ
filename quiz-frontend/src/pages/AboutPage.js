@@ -1,5 +1,6 @@
 import React from "react";
 import { useNavigate } from "react-router-dom";
+import useIsMobile from "../hooks/useIsMobile";
 
 const TECH = [
     { icon: "⚛️", name: "React 18", desc: "Fast, reactive UI" },
@@ -36,6 +37,7 @@ const GitHubIcon = () => (
 
 export default function AboutPage() {
     const navigate = useNavigate();
+    const isMobile = useIsMobile();
     return (
         <div style={{ background: "var(--bg)", minHeight: "calc(100vh - 60px)", padding: "3rem 1.5rem" }}>
             <div style={{ maxWidth: "820px", margin: "0 auto" }}>
@@ -75,7 +77,7 @@ export default function AboutPage() {
                 {/* Features */}
                 <div className="card" style={{ marginBottom: "1.5rem", padding: "2rem" }}>
                     <h2 className="section-title">✨ Key Features</h2>
-                    <div style={{ columns: "2", gap: "1rem" }}>
+                    <div style={{ columns: isMobile ? 1 : 2, gap: "1rem" }}>
                         {FEATURES.map(f => (
                             <div key={f} style={{ display: "flex", gap: ".5rem", alignItems: "flex-start", marginBottom: ".6rem", breakInside: "avoid" }}>
                                 <span style={{ color: "var(--success)", fontWeight: 700, flexShrink: 0, marginTop: ".05rem" }}>✓</span>
@@ -88,7 +90,7 @@ export default function AboutPage() {
                 {/* Tech stack */}
                 <div className="card" style={{ marginBottom: "1.5rem", padding: "2rem" }}>
                     <h2 className="section-title">🛠 Technology Stack</h2>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: ".75rem" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2,1fr)" : "repeat(3,1fr)", gap: ".75rem" }}>
                         {TECH.map(({ icon, name, desc }) => (
                             <div key={name} style={{
                                 padding: "1rem", background: "var(--surface)", borderRadius: "var(--radius-sm)",
