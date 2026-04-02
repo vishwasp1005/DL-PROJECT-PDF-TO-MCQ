@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import useConfetti from "../hooks/useConfetti";
+import useIsMobile from "../hooks/useIsMobile";
 import { useLocation, useNavigate } from "react-router-dom";
 import { parseOptions, analyzeTopicPerformance } from "../utils/textAnalysis";
 
@@ -72,8 +73,9 @@ function ProgressRing({ pct }) {
 }
 
 export default function ResultPage() {
-    const location = useLocation();
-    const navigate = useNavigate();
+    const location  = useLocation();
+    const navigate  = useNavigate();
+    const isMobile  = useIsMobile();
     const { questions = [], answers = {}, correct = 0, total = 0, pdfName, timeTaken, difficulty } = location.state || {};
     const pct = total ? Math.round((correct / total) * 100) : 0;
     const msg = pct >= 80 ? "Excellent Work!" : pct >= 50 ? "Good Effort!" : "Keep Practicing!";
@@ -143,11 +145,11 @@ export default function ResultPage() {
                     ))}
                 </div>
 
-                {/* ── Topic Performance Panel ─────────────────────────────── */}
+                {/* Topic Performance Panel */}
                 {hasTopicData && (
                     <div className="card" style={{ marginBottom: "1.25rem" }}>
                         <h2 className="section-title" style={{ marginBottom: "1rem" }}>📊 Topic Performance</h2>
-                        <div style={{ display: "grid", gridTemplateColumns: weakTopics.length && strongTopics.length ? "1fr 1fr" : "1fr", gap: "1rem" }}>
+                        <div style={{ display: "grid", gridTemplateColumns: (weakTopics.length && strongTopics.length && !isMobile) ? "1fr 1fr" : "1fr", gap: "1rem" }}>
                             {weakTopics.length > 0 && (
                                 <div>
                                     <div style={{ fontSize: ".72rem", fontWeight: 700, color: "var(--danger)", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: ".625rem" }}>
