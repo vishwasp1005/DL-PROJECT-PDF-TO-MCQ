@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import API from "../api";
+import useIsMobile from "../hooks/useIsMobile";
 
 const PDF_META_KEY = "qf_last_pdf"; // localStorage key for persisted PDF metadata
 
@@ -24,8 +25,9 @@ export function clearPdfMeta() {
 }
 
 export default function GeneratePage() {
-    const navigate = useNavigate();
-    const fileInputRef = useRef();
+    const navigate    = useNavigate();
+    const fileInputRef= useRef();
+    const isMobile    = useIsMobile();
 
     // ── Restore from localStorage on first mount ──────────────────────────────
     const saved = loadPdfMeta();
@@ -246,7 +248,7 @@ export default function GeneratePage() {
 
     return (
         <div style={{ background: "var(--bg)", minHeight: "calc(100vh - 60px)", paddingBottom: "4rem" }}>
-            <div style={{ maxWidth: "780px", margin: "0 auto", padding: "2.5rem 1.5rem" }}>
+            <div style={{ maxWidth: "780px", margin: "0 auto", padding: isMobile ? "1.5rem 1rem" : "2.5rem 1.5rem" }}>
 
                 {/* Breadcrumb */}
                 <div className="breadcrumb" style={{ marginBottom: ".75rem" }}>
@@ -299,28 +301,39 @@ export default function GeneratePage() {
                                 <div style={{ fontWeight: 700, fontSize: ".9rem", color: "var(--navy)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                                     {file ? file.name : pdfMeta?.name}
                                 </div>
-                                <div style={{ fontSize: ".72rem", color: "var(--text-muted)", marginTop: ".15rem" }}>
-                                    {((file?.size || pdfMeta?.size || 0) / 1024).toFixed(0)} KB
-                                    {(wordCount || pdfMeta?.wordCount) && <span> · {(wordCount || pdfMeta.wordCount).toLocaleString()} words</span>}
-                                    {(detectedDiff || pdfMeta?.detectedDiff) && (
-                                        <span> · AI suggests: <strong style={{ color: (detectedDiff || pdfMeta.detectedDiff) === "Easy" ? "var(--success)" : (detectedDiff || pdfMeta.detectedDiff) === "Hard" ? "var(--danger)" : "var(--warning)" }}>
-                                            {detectedDiff || pdfMeta.detectedDiff}
-                                        </strong></span>
+                                <div style={{ display: "flex", flexWrap: "wrap", gap: ".3rem", marginTop: ".4rem" }}>
+                                    <span style={{ fontSize: ".68rem", fontWeight: 600, background: "var(--surface)", color: "var(--text-muted)", padding: ".15rem .5rem", borderRadius: "999px", border: "1px solid var(--border)" }}>
+                                        {((file?.size || pdfMeta?.size || 0) / 1024).toFixed(0)} KB
+                                    </span>
+                                    {(wordCount || pdfMeta?.wordCount) && (
+                                        <span style={{ fontSize: ".68rem", fontWeight: 600, background: "var(--surface)", color: "var(--text-muted)", padding: ".15rem .5rem", borderRadius: "999px", border: "1px solid var(--border)" }}>
+                                            {(wordCount || pdfMeta.wordCount).toLocaleString()} words
+                                        </span>
                                     )}
-                                    {extracting && <span style={{ color: "var(--accent)" }}> · Analysing...</span>}
+                                    {(detectedDiff || pdfMeta?.detectedDiff) && (
+                                        <span style={{
+                                            fontSize: ".68rem", fontWeight: 700, padding: ".15rem .5rem", borderRadius: "999px",
+                                            background: (detectedDiff || pdfMeta.detectedDiff) === "Easy" ? "var(--success-bg)" : (detectedDiff || pdfMeta.detectedDiff) === "Hard" ? "var(--danger-bg)" : "var(--warning-bg)",
+                                            color: (detectedDiff || pdfMeta.detectedDiff) === "Easy" ? "var(--success)" : (detectedDiff || pdfMeta.detectedDiff) === "Hard" ? "var(--danger)" : "var(--warning)",
+                                        }}>
+                                            AI: {detectedDiff || pdfMeta.detectedDiff}
+                                        </span>
+                                    )}
+                                    {extracting && <span style={{ fontSize: ".68rem", fontWeight: 600, color: "var(--accent)" }}>Analysing…</span>}
                                 </div>
                                 {/* Restored-state hint */}
                                 {!file && pdfMeta && (
                                     <div style={{
                                         marginTop: ".4rem", fontSize: ".7rem",
                                         color: "var(--warning)", fontWeight: 600,
-                                        display: "flex", alignItems: "center", gap: ".3rem",
+                                        display: "flex", alignItems: "center", gap: ".3rem", flexWrap: "wrap",
                                     }}>
                                         ⚠️ PDF not loaded — click <span
                                             style={{ color: "var(--navy)", cursor: "pointer", textDecoration: "underline" }}
                                             onClick={() => fileInputRef.current?.click()}
                                         >Upload again</span> to generate, or Change to pick a different file.
                                     </div>
+
                                 )}
                             </div>
                             <button className="btn btn-outline" style={{ fontSize: ".78rem", padding: ".4rem .9rem", flexShrink: 0 }}
