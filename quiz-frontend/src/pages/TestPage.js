@@ -4,6 +4,7 @@ import API from "../api";
 import Loader from "../components/Loader";
 import { addScore } from "../utils/storage";
 import { parseOptions } from "../utils/textAnalysis";
+import useIsMobile from "../hooks/useIsMobile";
 
 const DIFFICULTY_CONFIG = {
     Easy: { num: 5, label: "Beginner", icon: "🟢", tag: "FOUNDATIONAL", desc: "Foundational concepts and basic recall.", tagColor: "var(--success)" },
@@ -16,8 +17,9 @@ function formatTime(s) {
 }
 
 export default function TestPage() {
-    const location = useLocation();
-    const navigate = useNavigate();
+    const location  = useLocation();
+    const navigate  = useNavigate();
+    const isMobile  = useIsMobile();
     const { quizSessionId, pdfName, questions: passedQs } = location.state || {};
 
     const [phase, setPhase] = useState("pick"); // pick | taking | result
@@ -110,7 +112,7 @@ export default function TestPage() {
                         </div>
                     )}
 
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: "1rem", marginBottom: "2rem" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3,1fr)", gap: "1rem", marginBottom: "2rem" }}>
                         {Object.entries(DIFFICULTY_CONFIG).map(([diff, cfg]) => (
                             <div key={diff} className="card"
                                 style={{ textAlign: "center", padding: "1.75rem", cursor: "pointer", transition: "all .15s", position: "relative" }}
@@ -167,7 +169,7 @@ export default function TestPage() {
         const cfg = DIFFICULTY_CONFIG[difficulty];
 
         return (
-            <div style={{ background: "var(--bg)", minHeight: "calc(100vh - 60px)", padding: "2rem 1.5rem" }}>
+            <div style={{ background: "var(--bg)", minHeight: "calc(100vh - 60px)", padding: isMobile ? "1.25rem .875rem" : "2rem 1.5rem" }}>
                 <div style={{ maxWidth: "680px", margin: "0 auto" }}>
                     {/* Progress header */}
                     <div className="card" style={{ marginBottom: "1.25rem" }}>
@@ -235,15 +237,21 @@ export default function TestPage() {
                     </div>
 
                     {/* Navigation */}
-                    <div style={{ display: "flex", gap: ".625rem", justifyContent: "space-between" }}>
-                        <button className="btn btn-outline" onClick={handlePrev} disabled={currentIdx === 0}>
+                    <div style={{ display: "flex", flexDirection: isMobile ? "column-reverse" : "row", gap: isMobile ? ".5rem" : ".625rem", justifyContent: "space-between" }}>
+                        <button className="btn btn-outline"
+                            style={{ width: isMobile ? "100%" : undefined }}
+                            onClick={handlePrev} disabled={currentIdx === 0}>
                             ← Previous
                         </button>
-                        <div style={{ display: "flex", gap: ".5rem" }}>
+                        <div style={{ display: "flex", gap: ".5rem", width: isMobile ? "100%" : undefined }}>
                             {currentIdx < questions.length - 1 ? (
-                                <button className="btn btn-primary" onClick={handleNext}>Next Question →</button>
+                                <button className="btn btn-primary"
+                                    style={{ flex: isMobile ? 1 : undefined }}
+                                    onClick={handleNext}>Next Question →</button>
                             ) : (
-                                <button className="btn btn-primary" disabled={answered < questions.length} onClick={handleSubmit}>
+                                <button className="btn btn-primary"
+                                    style={{ flex: isMobile ? 1 : undefined }}
+                                    disabled={answered < questions.length} onClick={handleSubmit}>
                                     Submit Test
                                 </button>
                             )}
