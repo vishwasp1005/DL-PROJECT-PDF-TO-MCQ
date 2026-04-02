@@ -5,6 +5,7 @@ import { getBookmarks, toggleBookmark } from "../utils/storage";
 import { exportHTML, exportPDF } from "../utils/export";
 import AITutorChat from "../components/ai/AITutorChat";
 import useKeyboardShortcuts from "../hooks/useKeyboardShortcuts";
+import useIsMobile from "../hooks/useIsMobile";
 
 export default function StudyPage() {
     const location = useLocation();
@@ -21,6 +22,7 @@ export default function StudyPage() {
     const [search, setSearch] = useState("");
     const [activeQIdx, setActiveQIdx] = useState(0); // for AI tutor context
     const [showTutor, setShowTutor] = useState(false);
+    const isMobile = useIsMobile();
 
     const filtered = questions.filter(q => {
         if (filter === "bookmarked") return bookmarks.includes(q.id);
@@ -87,7 +89,7 @@ export default function StudyPage() {
     );
 
     return (
-        <div style={{ background: "var(--bg)", minHeight: "calc(100vh - 60px)", padding: "2rem 1.5rem" }}>
+        <div style={{ background: "var(--bg)", minHeight: "calc(100vh - 60px)", padding: isMobile ? "1.25rem .875rem" : "2rem 1.5rem" }}>
             <div style={{ maxWidth: "760px", margin: "0 auto" }}>
 
                 {/* Tab bar */}
@@ -137,12 +139,12 @@ export default function StudyPage() {
                             </div>
                         </div>
                         {/* Navigation */}
-                        <div style={{ display: "flex", justifyContent: "center", gap: ".75rem" }}>
-                            <button className="btn btn-outline" disabled={flashIdx === 0}
+                        <div style={{ display: "flex", justifyContent: "center", gap: ".75rem", flexWrap: isMobile ? "wrap" : "nowrap" }}>
+                            <button className="btn btn-outline" style={{ flex: isMobile ? "1 1 calc(50% - .4rem)" : undefined }} disabled={flashIdx === 0}
                                 onClick={() => { setFlashIdx(i => i - 1); setFlipped(false); }}>← Prev</button>
-                            <button className="btn btn-outline"
+                            <button className="btn btn-outline" style={{ flex: isMobile ? "1 1 100%" : undefined }}
                                 onClick={() => { setFlashIdx(Math.floor(Math.random() * questions.length)); setFlipped(false); }}>🔀 Shuffle</button>
-                            <button className="btn btn-primary" disabled={flashIdx === questions.length - 1}
+                            <button className="btn btn-primary" style={{ flex: isMobile ? "1 1 calc(50% - .4rem)" : undefined }} disabled={flashIdx === questions.length - 1}
                                 onClick={() => { setFlashIdx(i => i + 1); setFlipped(false); }}>Next →</button>
                         </div>
                     </div>
