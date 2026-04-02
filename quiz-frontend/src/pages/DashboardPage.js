@@ -5,6 +5,7 @@ import { getScoreHistory, getBookmarks, clearScoreHistory } from "../utils/stora
 import RecommendationCard from "../components/ai/RecommendationCard";
 import { SkeletonCard } from "../components/ui/SkeletonLoader";
 import { useToast } from "../components/ui/Toast";
+import useIsMobile from "../hooks/useIsMobile";
 
 // ── SVG Donut Chart ─────────────────────────────────────────────
 function DonutChart({ data, size = 140 }) {
@@ -173,7 +174,8 @@ function StatCard({ ico, val, lbl, numVal }) {
 }
 
 export default function DashboardPage() {
-    const navigate = useNavigate();
+    const navigate   = useNavigate();
+    const isMobile   = useIsMobile();
     const [sessions, setSessions] = useState([]);
     const [loading, setLoading] = useState(true);
     const toast = useToast();
@@ -233,7 +235,7 @@ export default function DashboardPage() {
     if (loading) return (
         <div style={{ background: "var(--bg)", minHeight: "calc(100vh - 60px)", padding: "2rem 1.5rem" }}>
             <div style={{ maxWidth: "1000px", margin: "0 auto" }}>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: "1rem", marginBottom: "1.75rem" }}>
+                <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap: "1rem", marginBottom: "1.75rem" }}>
                     {[1, 2, 3, 4].map(i => <SkeletonCard key={i} lines={2} />)}
                 </div>
             </div>
@@ -259,7 +261,7 @@ export default function DashboardPage() {
                 </div>
 
                 {/* Stat cards */}
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: "1rem", marginBottom: "1.75rem" }}>
+                <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(4,1fr)", gap: "1rem", marginBottom: "1.75rem" }}>
                     {stats.map(({ ico, val, lbl }) => {
                         const numVal = typeof val === "string" && val.endsWith("%") ? parseFloat(val) : typeof val === "number" ? val : null;
                         return (
@@ -281,7 +283,7 @@ export default function DashboardPage() {
                 )}
 
                 {/* Quick actions */}
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: "1rem", marginBottom: "2rem" }}>
+                <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3,1fr)", gap: isMobile ? ".625rem" : "1rem", marginBottom: "2rem" }}>
                     <button className="btn btn-primary" onClick={() => navigate("/generate")}>⚡ Generate New Quiz</button>
                     <button className="btn btn-outline" onClick={() => navigate("/study")}>📚 Study Mode</button>
                     <button className="btn btn-outline" onClick={() => navigate("/test")}>✏️ Test Mode</button>
