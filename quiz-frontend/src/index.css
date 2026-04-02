@@ -1217,112 +1217,337 @@ body {
 @keyframes fadeInUp  { from{opacity:0;transform:translateY(16px)} to{opacity:1;transform:translateY(0)} }
 @keyframes pulse-dot { 0%,100%{opacity:1;box-shadow:0 0 8px #10B981} 50%{opacity:.5;box-shadow:0 0 4px #10B981} }
 
-/* ── Toast animations ───────────────────────────── */
-@keyframes toastIn  { from{opacity:0;transform:translateX(60px)} to{opacity:1;transform:translateX(0)} }
-@keyframes toastOut { from{opacity:1;transform:translateX(0)}    to{opacity:0;transform:translateX(60px)} }
-
 /* ══════════════════════════════════════════════════
-   MOBILE RESPONSIVE — Full breakpoints
+   MOBILE RESPONSIVE — Complete page-by-page breakpoints
    ══════════════════════════════════════════════════ */
 
-/* Tablet: 768px */
+/* ─── Navbar ─────────────────────────────────────── */
+.desktop-nav    { display: flex; }
+.hamburger      { display: none !important; }
+.shortcut-hint  { display: inline-block; }
+.signout-btn    { display: flex; }
+.guest-badge    { display: inline-block; }
+
+/* ── TABLET 768px ───────────────────────────────── */
 @media (max-width: 768px) {
-  /* Page layout */
+
+  /* Navbar: hide desktop links, show hamburger */
+  .desktop-nav   { display: none !important; }
+  .hamburger     { display: flex !important; }
+  .shortcut-hint { display: none !important; }
+  .signout-btn   { display: none !important; }
+  .brand-text    { display: block; }
+
+  /* Page padding */
   .page { padding: 1.25rem 1rem !important; }
 
-  /* Headings */
-  .page-title { font-size: 1.6rem !important; }
-  h1 { font-size: 1.5rem !important; }
-  h2 { font-size: 1.25rem !important; }
+  /* Typography */
+  .page-title    { font-size: 1.5rem !important; }
+  .page-subtitle { font-size: .88rem !important; }
+  h1             { font-size: 1.45rem !important; }
+  h2             { font-size: 1.2rem !important; }
 
-  /* Stat grids — 4 columns → 2 */
+  /* ── Cards ── */
+  .card { padding: 1.25rem !important; }
+
+  /* ── Buttons full-width in stacked layouts ── */
+  .btn-full { width: 100% !important; }
+
+  /* ── History cards stack ── */
+  .history-card {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: .625rem !important;
+  }
+
+  /* ─── HomePage ─────────────────────────── */
+  /* Hero section tighten */
+  section[style*="min-height"] {
+    min-height: unset !important;
+    padding: 3.5rem 1.25rem !important;
+  }
+  /* Stats bar → 1 col */
+  .stats-bar-grid {
+    grid-template-columns: 1fr !important;
+    gap: 1.5rem !important;
+  }
+  /* How it works 3-col → 1 */
+  .how-it-works-grid {
+    grid-template-columns: 1fr !important;
+  }
+  /* Footer 3-col → 2 */
+  .footer-grid {
+    grid-template-columns: 1fr 1fr !important;
+    gap: 2rem !important;
+  }
+
+  /* ─── DashboardPage ────────────────────── */
+  /* Stat cards 4-col → 2 */
   div[style*="repeat(4,1fr)"] {
     grid-template-columns: repeat(2, 1fr) !important;
   }
-
   /* Charts side-by-side → stacked */
-  .charts-row {
-    grid-template-columns: 1fr !important;
-  }
-
-  /* 3-col grids → 1 col */
+  .charts-row { grid-template-columns: 1fr !important; }
+  /* Quick actions 3-col → 1 */
   div[style*="repeat(3,1fr)"] {
     grid-template-columns: 1fr !important;
   }
 
-  /* Quick action buttons in Dashboard/StudyPage */
-  .btn { width: 100%; justify-content: center; }
-
-  /* Navbar */
-  .nav-links { gap: .5rem !important; }
-  .nav-links a, .nav-links button { font-size: .75rem !important; padding: .375rem .5rem !important; }
-
-  /* Card padding */
-  .card { padding: 1.25rem !important; }
-
-  /* History cards — stack on mobile */
-  .history-card { flex-direction: column !important; align-items: flex-start !important; gap: .5rem !important; }
-
-  /* Footer grid */
-  .footer-grid { grid-template-columns: 1fr 1fr !important; gap: 2rem; }
-
-  /* Hero section */
-  section[style*="min-height: 85vh"] { min-height: 60vh !important; padding: 3rem 1.25rem !important; }
-
-  /* Doc stats row */
+  /* ─── GeneratePage ─────────────────────── */
+  .upload-zone { padding: 1.75rem 1rem !important; }
   .doc-stats-row { grid-template-columns: repeat(2, 1fr) !important; }
+  /* Q-type 2-col grid → 1 */
+  div[style*="gridTemplateColumns: \"1fr 1fr\""] {
+    grid-template-columns: 1fr !important;
+  }
 
-  /* Study/Test tabs */
-  .tab-bar { overflow-x: auto; white-space: nowrap; }
+  /* ─── StudyPage ────────────────────────── */
+  .tab-bar { overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch; }
+  /* AI tutor shorter on tablet */
+  div[style*="height: 500px"] { height: 400px !important; }
 
-  /* AI Tutor height */
-  div[style*="height: 500px"] { height: 420px !important; }
+  /* ─── TestPage ─────────────────────────── */
+  /* Option buttons full width */
+  .option-btn { width: 100% !important; }
+
+  /* ─── ResultPage ───────────────────────── */
+  div[style*="repeat(3,1fr)"].result-stats {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* ─── AboutPage ────────────────────────── */
+  /* Feature columns → 1 */
+  div[style*="columns: \"2\""] { columns: 1 !important; }
+
+  /* ─── FlashcardPage ────────────────────── */
+  .flashcard { max-width: 100% !important; }
+
+  /* ─── ShortcutModal ────────────────────── */
+  div[style*="maxWidth: \"440px\""] {
+    max-width: calc(100vw - 2rem) !important;
+  }
+
+  /* AI Tutor */
+  div[style*="height: 420px"] { height: 360px !important; }
 }
 
-/* Phone: 480px */
+/* ── PHONE 480px ─────────────────────────────────── */
 @media (max-width: 480px) {
-  /* Full-width page */
   body { overflow-x: hidden; }
+
+  /* Padding tighter */
   .page { padding: 1rem .75rem !important; }
 
-  /* Text */
-  .page-title { font-size: 1.35rem !important; }
+  /* Typography */
+  .page-title    { font-size: 1.25rem !important; }
   .page-subtitle { font-size: .82rem !important; }
+  h1             { font-size: 1.2rem !important; }
+  h2             { font-size: 1.05rem !important; }
 
-  /* All multi-column grids → single */
+  /* Cards */
+  .card { border-radius: 12px !important; padding: 1rem !important; }
+
+  /* Brand tagline — hide on tiny screens */
+  .brand-text div:last-child { display: none; }
+
+  /* Grids → all single column */
   div[style*="repeat(2,1fr)"],
   div[style*="repeat(3,1fr)"],
   div[style*="repeat(4,1fr)"] {
     grid-template-columns: 1fr !important;
   }
-  .charts-row { grid-template-columns: 1fr !important; }
+  .charts-row    { grid-template-columns: 1fr !important; }
+  .footer-grid   { grid-template-columns: 1fr !important; }
+  .doc-stats-row { grid-template-columns: 1fr 1fr !important; }
 
-  /* Cards */
-  .card { border-radius: 12px !important; }
+  /* ─── HomePage ─────────────────────────── */
+  /* Hero headline */
+  .hero-headline { font-size: 2rem !important; }
+  /* CTA buttons stack */
+  .hero-cta { flex-direction: column !important; width: 100%; }
+  .hero-cta .btn { width: 100% !important; }
 
-  /* Footer */
-  .footer-grid { grid-template-columns: 1fr !important; }
+  /* ─── Navbar mobile menu ───────────────── */
+  .hamburger { display: flex !important; }
+  .guest-badge { display: none !important; }
 
-  /* Navbar — tighten */
-  .nav-link-label { display: none; }
-  .navbar-inner { padding: 0 .75rem !important; }
+  /* ─── LoginPage / RegisterPage ─────────── */
+  .auth-card { margin: 1rem !important; padding: 1.5rem 1.25rem !important; }
 
-  /* Toast — full width on phone */
+  /* ─── GeneratePage ─────────────────────── */
+  .upload-zone { padding: 1.5rem .875rem !important; }
+  .doc-stats-row { grid-template-columns: 1fr 1fr !important; }
+  /* Difficulty buttons */
+  div[style*="display: \"flex\""][style*="gap: \".5rem\""] button {
+    padding: .4rem !important; font-size: .75rem !important;
+  }
+
+  /* ─── StudyPage ────────────────────────── */
+  div[style*="height: 500px"] { height: 360px !important; }
+  div[style*="height: 400px"] { height: 340px !important; }
+
+  /* ─── TestPage ─────────────────────────── */
+  .test-question { font-size: .9rem !important; }
+
+  /* ─── ResultPage ───────────────────────── */
+  /* Progress ring centered */
+  div[style*="maxWidth: \"680px\""] { padding: 0 !important; }
+
+  /* ─── DashboardPage ────────────────────── */
+  .stat-card { padding: 1rem !important; }
+  .stat-value { font-size: 1.5rem !important; }
+
+  /* ─── AboutPage ────────────────────────── */
+  div[style*="columns"] { columns: 1 !important; }
+
+  /* ─── Toast full width ─────────────────── */
   div[style*="top: 5rem"][style*="right: 1.5rem"] {
     right: .75rem !important;
     left: .75rem !important;
     align-items: stretch !important;
   }
   div[style*="top: 5rem"][style*="right: 1.5rem"] > div {
-    min-width: unset !important;
-    max-width: 100% !important;
-    width: 100% !important;
+    min-width: unset !important; max-width: 100% !important; width: 100% !important;
   }
 
-  /* Quick action pills (StudyPage empty state) */
-  div[style*="flex-wrap: wrap"] { justify-content: flex-start !important; }
+  /* ─── ShortcutModal ────────────────────── */
+  div[style*="maxWidth: \"440px\""] {
+    max-width: calc(100vw - 1.5rem) !important;
+    padding: 1.25rem !important;
+    max-height: 90vh !important;
+  }
+
+  /* AI Tutor shorter */
+  div[style*="height: 500px"] { height: 340px !important; }
+  div[style*="height: 420px"] { height: 320px !important; }
+  div[style*="height: 380px"] { height: 300px !important; }
+}
+
+/* ── TINY 380px ──────────────────────────────────── */
+@media (max-width: 380px) {
+  /* Brand — show only logo Q */
+  .brand-text { display: none !important; }
+
+  .page { padding: .875rem .625rem !important; }
+
+  .card { padding: .875rem !important; }
+
+  /* Stat cards 2-col → 1 on very tiny */
+  div[style*="repeat(2,1fr)"] {
+    grid-template-columns: 1fr !important;
+  }
+  .doc-stats-row { grid-template-columns: 1fr !important; }
+
+  .page-title { font-size: 1.1rem !important; }
+
+  /* Difficulty buttons — 3 on one row still */
+  div[style*="gap: \".5rem\""] button { flex: 1; padding: .35rem .25rem !important; font-size: .7rem !important; }
 
   /* AI tutor */
-  div[style*="height: 500px"] { height: 380px !important; }
-  div[style*="height: 420px"] { height: 360px !important; }
+  div[style*="height: 500px"] { height: 300px !important; }
+}
+
+/* ─── Toast animations ──────────────────────────── */
+@keyframes toastIn  { from{opacity:0;transform:translateX(60px)} to{opacity:1;transform:translateX(0)} }
+@keyframes toastOut { from{opacity:1;transform:translateX(0)}    to{opacity:0;transform:translateX(60px)} }
+
+/* ══════════════════════════════════════════════════
+   GLOBAL MOBILE POLISH  (never affects desktop)
+   ══════════════════════════════════════════════════ */
+
+/* Prevent horizontal overflow on every screen */
+html, body { overflow-x: hidden; }
+
+@media (max-width: 768px) {
+  /* ── Upload zone ── */
+  .upload-zone { padding: 2rem 1rem !important; }
+  .upload-zone p { font-size: .8rem !important; }
+
+  /* ── Doc-stats 2×2 grid ── */
+  .doc-stats-row {
+    grid-template-columns: 1fr 1fr !important;
+  }
+
+  /* ── Option items: bigger tap area ── */
+  .option-item {
+    min-height: 48px !important;
+    padding: .875rem 1rem !important;
+  }
+
+  /* ── Tab bar scrollable ── */
+  .tab-bar {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scroll-snap-type: x mandatory;
+  }
+  .tab-btn { scroll-snap-align: start; white-space: nowrap; flex-shrink: 0; }
+
+  /* ── Result action buttons ── */
+  .result-actions { flex-direction: column !important; }
+  .result-actions .btn { width: 100% !important; }
+
+  /* ── History card inside dashboard ── */
+  .history-card {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: .5rem !important;
+  }
+  .history-card .history-actions { width: 100%; justify-content: flex-end; }
+
+  /* ── Study mode header row (title + filter chips) ── */
+  .study-header-row {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: .75rem !important;
+  }
+
+  /* ── Generate page Q-count slider row ── */
+  .qcount-row { flex-wrap: wrap !important; }
+
+  /* ── Chart height on tablet ── */
+  .charts-row { grid-template-columns: 1fr !important; }
+  .chart-container { min-height: 200px; }
+
+  /* ── Modal full-width on mobile ── */
+  .modal-overlay .card {
+    width: calc(100vw - 2rem) !important;
+    max-width: 100% !important;
+    margin: 1rem !important;
+    border-radius: 16px !important;
+  }
+
+  /* ── Toast full width ── */
+  .toast-container {
+    left: .75rem !important;
+    right: .75rem !important;
+    align-items: stretch !important;
+  }
+}
+
+@media (max-width: 480px) {
+  /* ── All page padding tighter ── */
+  .page { padding: 1rem .875rem !important; }
+  .card  { padding: 1rem !important; }
+
+  /* ── Typography scale ── */
+  .page-title    { font-size: 1.3rem !important; }
+  .page-subtitle { font-size: .82rem !important; }
+  h1 { font-size: 1.3rem !important; }
+  h2 { font-size: 1.1rem !important; }
+
+  /* ── Doc-stats 2-col → still 2-col on phone (fits) ── */
+
+  /* ── Question progress header ── */
+  .progress-header-row {
+    flex-direction: column !important;
+    gap: .5rem !important;
+    align-items: flex-start !important;
+  }
+
+  /* ── Stat cards: phone shows 2 per row ── */
+  .stats-grid-4 { grid-template-columns: repeat(2,1fr) !important; }
+
+  /* ── AI tutor panel ── */
+  div[style*="height: 500px"] { height: 360px !important; }
+  div[style*="height: 420px"] { height: 320px !important; }
 }
