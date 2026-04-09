@@ -81,20 +81,26 @@ async def generate_quiz(
     if capped_questions != num_questions:
         print(f"INFO: Capped num_questions from {num_questions} → {capped_questions} (word_count={word_count})")
 
-    # -------------------------
-    # Generate Questions via LLM
-    # -------------------------
-    questions = await generate_quiz_from_text(
-        text,
-        capped_questions,
-        q_type,
-        difficulty
-    )
+    try:
+        questions = await generate_quiz_from_text(
+            text,
+            capped_questions,
+            q_type,
+            difficulty
+        )
+    except RuntimeError as llm_err:
+        raise HTTPException(
+            status_code=500,
+            detail=str(llm_err)
+        )
 
     if not questions:
         raise HTTPException(
             status_code=500,
-            detail=f"LLM returned empty response. Try fewer questions (max suggested: {max_q})."
+            detail=(
+                f"AI returned no questions. PDF may have too little unique content. "
+                f"Max supported for this file: {max_q} questions."
+            )
         )
 
 
