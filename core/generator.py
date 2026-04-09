@@ -5,8 +5,8 @@ from typing import List
 from groq import Groq
 from core.config import GROQ_API_KEY
 
-# 🔥 Use supported Groq model
-MODEL_NAME = "llama-3.1-8b-instant"
+# Reliable Groq model — better quality and less rate-limited than 8b-instant
+MODEL_NAME = "llama-3.3-70b-versatile"
 
 client = Groq(api_key=GROQ_API_KEY)
 
@@ -16,7 +16,9 @@ client = Groq(api_key=GROQ_API_KEY)
 # =========================
 def build_prompt(context: str, num_questions: int, q_type: str, difficulty: str):
     level = {"Easy": "BASIC recall", "Medium": "COMPREHENSION", "Hard": "ANALYSIS"}.get(difficulty, "COMPREHENSION")
-    ctx = context[:3000]
+    # Use up to 12,000 chars — enough for any normal lecture PDF
+    # Old value of 3,000 was too small (a 3K-word doc is ~18K chars)
+    ctx = context[:12000]
 
     if q_type == "TF":
         return f"""Generate {num_questions} True/False questions at {level} level.
@@ -263,7 +265,7 @@ async def _generate_single(
                 {"role": "user", "content": prompt}
             ],
             temperature=0.4,
-            max_tokens=8192,
+            max_tokens=4096,   # llama-3.3-70b supports up to 32K output; 4K is plenty for 30 MCQs
         )
 
         content = response.choices[0].message.content
@@ -292,10 +294,14 @@ async def _generate_single(
         return valid
 
     except Exception as e:
-        print("LLM ERROR:", e)
-        import traceback
-        traceback.print_exc()
-        return []
+        # Re-raise with a descriptive message so the route can return a
+        # meaningful 500 detail instead of a blank one.
+        error_type = type(e).__name__
+        error_msg  = str(e)
+        print(f"LLM ERROR ({error_type}): {error_msg}")
+        import traceback; traceback.print_exc()
+        # Surface the real error to the caller
+        raise RuntimeError(f"Groq API error [{error_type}]: {error_msg}") from e
 
 
 # =========================
