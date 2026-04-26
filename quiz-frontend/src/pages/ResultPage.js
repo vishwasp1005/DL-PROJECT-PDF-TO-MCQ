@@ -116,17 +116,17 @@ export default function ResultPage() {
             <div style={{ maxWidth: "680px", margin: "0 auto" }}>
 
                 {/* Score card with animated ring */}
-                <div className="card" style={{ textAlign: "center", padding: "2.5rem", background: "var(--navy)", border: "none", marginBottom: "1.25rem" }}>
+                <div className="card" style={{ textAlign: "center", padding: isMobile ? "1.75rem 1.25rem" : "2.5rem", background: "var(--navy)", border: "none", marginBottom: "1.25rem" }}>
                     <ProgressRing pct={pct} />
-                    <h2 style={{ color: "#fff", fontSize: "1.5rem", fontWeight: 800, marginBottom: ".4rem" }}>{emoji} {msg}</h2>
-                    <p style={{ color: "rgba(255,255,255,.65)", fontSize: ".875rem", lineHeight: 1.65 }}>
+                    <h2 style={{ color: "#fff", fontSize: isMobile ? "1.2rem" : "1.5rem", fontWeight: 800, marginBottom: ".4rem" }}>{emoji} {msg}</h2>
+                    <p style={{ color: "rgba(255,255,255,.65)", fontSize: isMobile ? ".82rem" : ".875rem", lineHeight: 1.65 }}>
                         You scored {correct} out of {total} — {pct >= 80 ? "Outstanding!" : pct >= 50 ? "Keep it up!" : "Review the material and try again."}
                         {formatTime(timeTaken) && (
                             <span style={{ display: "block", marginTop: ".375rem", fontSize: ".78rem", opacity: .75 }}>⏱ Time taken: {formatTime(timeTaken)}</span>
                         )}
                     </p>
                     <button onClick={handleShare}
-                        style={{ marginTop: "1rem", background: "rgba(255,255,255,.15)", border: "1px solid rgba(255,255,255,.3)", color: "#fff", padding: ".5rem 1.25rem", borderRadius: "999px", cursor: "pointer", fontSize: ".8rem", fontWeight: 600 }}>
+                        style={{ marginTop: "1rem", background: "rgba(255,255,255,.15)", border: "1px solid rgba(255,255,255,.3)", color: "#fff", padding: ".5rem 1.25rem", borderRadius: "999px", cursor: "pointer", fontSize: ".8rem", fontWeight: 600, minHeight: "44px" }}>
                         {copied ? "✅ Link Copied!" : "🔗 Share Results"}
                     </button>
                 </div>
@@ -250,7 +250,7 @@ export default function ResultPage() {
                 </div>
 
                 {/* Actions */}
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: ".625rem" }}>
+                <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(4,1fr)", gap: ".625rem" }}>
                     <button className="btn btn-outline" onClick={() => navigate("/generate")}>⚡ New Quiz</button>
                     <button className="btn btn-primary" onClick={() => navigate("/study", { state: { questions, pdfName } })}>📚 Study</button>
                     <button className="btn btn-outline" onClick={() => navigate("/leaderboard")}>🏆 Board</button>
