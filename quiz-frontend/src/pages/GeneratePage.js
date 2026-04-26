@@ -220,20 +220,21 @@ export default function GeneratePage() {
             clearInterval(tick);
             const status = e.response?.status;
             if (status === 401) {
-                // Stale or invalid token — clear session and send to login
                 localStorage.removeItem("token");
                 localStorage.removeItem("username");
                 localStorage.removeItem("isGuest");
                 navigate("/login", { state: { message: "Session expired. Please log in again." } });
                 return;
             }
+            // Always prefer the backend's detail message — it's specific
             const detail = e.response?.data?.detail;
             setError(
+                detail && detail !== "Invalid token" ? detail :
                 status === 422 ? "Invalid request — check your file or settings." :
-                    status === 413 ? "PDF too large. Try a smaller file." :
-                        status === 500 ? "Server error. Please try again in a moment." :
-                            detail && detail !== "Invalid token" ? detail :
-                                "Generation failed. Please try fewer questions or a different file."
+                status === 413 ? "PDF too large. Try a smaller file (max 20 MB)." :
+                status === 429 ? "AI rate limit reached. Please wait 30 seconds and retry." :
+                status === 503 ? "AI service temporarily unavailable. Please retry in a moment." :
+                "Generation failed. Try fewer questions or re-upload the PDF."
             );
         } finally {
             setTimeout(() => { setLoading(false); setProgress(0); }, 500);
@@ -429,7 +430,7 @@ export default function GeneratePage() {
                         </div>
 
                         {/* Question type — multi-select checkboxes */}
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: ".875rem" }}>
+                        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: ".875rem" }}>
                             {Q_TYPES.map(({ id, label, desc }) => (
                                 <label key={id} style={{
                                     display: "flex", alignItems: "center", gap: ".75rem",
@@ -437,6 +438,7 @@ export default function GeneratePage() {
                                     border: `1.5px solid ${qTypes.includes(id) ? "var(--navy)" : "var(--border)"}`,
                                     background: qTypes.includes(id) ? "var(--navy-muted)" : "var(--card)",
                                     cursor: "pointer", transition: "all .15s",
+                                    minHeight: "48px",
                                 }}>
                                     <input type="checkbox" checked={qTypes.includes(id)} onChange={() => toggleType(id)}
                                         style={{ accentColor: "var(--navy)", width: "15px", height: "15px", flexShrink: 0 }} />
@@ -452,6 +454,7 @@ export default function GeneratePage() {
                                 border: `1.5px solid ${detailedExp ? "var(--navy)" : "var(--border)"}`,
                                 background: detailedExp ? "var(--navy-muted)" : "var(--card)",
                                 cursor: "pointer", transition: "all .15s",
+                                minHeight: "48px",
                             }}>
                                 <input type="checkbox" checked={detailedExp} onChange={() => setDetailedExp(p => !p)}
                                     style={{ accentColor: "var(--navy)", width: "15px", height: "15px", flexShrink: 0 }} />
@@ -491,7 +494,7 @@ export default function GeneratePage() {
                 {/* ── GENERATE BUTTON ── */}
                 {file && (
                     <button className="btn btn-primary btn-full"
-                        style={{ padding: ".875rem", fontSize: ".95rem", marginBottom: "1rem" }}
+                        style={{ padding: ".875rem", fontSize: isMobile ? "1rem" : ".95rem", marginBottom: "1rem", minHeight: "52px" }}
                         disabled={loading || extracting || isGuest}
                         onClick={handleGenerate}>
                         {loading ? "Generating..." : "✦ Generate Study Questions"}
@@ -549,7 +552,7 @@ export default function GeneratePage() {
                             </div>
                             <div className="badge badge-success">Ready</div>
                         </div>
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: ".625rem" }}>
+                        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: ".625rem" }}>
                             <button className="btn btn-primary" onClick={() => goTo("/study")}>📚 Study Mode</button>
                             <button className="btn btn-outline" onClick={() => { setGenerated(null); setFile(null); setWordCount(null); setCharCount(null); setDetectedDiff(null); setTopics([]); }}>🔄 Regenerate MCQ</button>
                         </div>
