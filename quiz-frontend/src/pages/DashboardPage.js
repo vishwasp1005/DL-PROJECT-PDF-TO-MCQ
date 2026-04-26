@@ -233,7 +233,7 @@ export default function DashboardPage() {
     }, [isGuest]);
 
     if (loading) return (
-        <div style={{ background: "var(--bg)", minHeight: "calc(100vh - 60px)", padding: "2rem 1.5rem" }}>
+        <div style={{ background: "var(--bg)", minHeight: "calc(100vh - 60px)", padding: isMobile ? "1.25rem 1rem" : "2rem 1.5rem" }}>
             <div style={{ maxWidth: "1000px", margin: "0 auto" }}>
                 <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap: "1rem", marginBottom: "1.75rem" }}>
                     {[1, 2, 3, 4].map(i => <SkeletonCard key={i} lines={2} />)}
@@ -250,7 +250,7 @@ export default function DashboardPage() {
     ];
 
     return (
-        <div style={{ background: "var(--bg)", minHeight: "calc(100vh - 60px)", padding: "2rem 1.5rem" }}>
+        <div style={{ background: "var(--bg)", minHeight: "calc(100vh - 60px)", padding: isMobile ? "1.25rem 1rem" : "2rem 1.5rem" }}>
             <div style={{ maxWidth: "1000px", margin: "0 auto" }}>
                 <div style={{ marginBottom: "2rem" }}>
                     <div className="breadcrumb">YOUR PROGRESS › DASHBOARD</div>
@@ -261,7 +261,7 @@ export default function DashboardPage() {
                 </div>
 
                 {/* Stat cards */}
-                <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(4,1fr)", gap: "1rem", marginBottom: "1.75rem" }}>
+                <div className="stats-grid" style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap: "1rem", marginBottom: "1.75rem" }}>
                     {stats.map(({ ico, val, lbl }) => {
                         const numVal = typeof val === "string" && val.endsWith("%") ? parseFloat(val) : typeof val === "number" ? val : null;
                         return (
@@ -284,14 +284,14 @@ export default function DashboardPage() {
 
                 {/* Quick actions */}
                 <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3,1fr)", gap: isMobile ? ".625rem" : "1rem", marginBottom: "2rem" }}>
-                    <button className="btn btn-primary" onClick={() => navigate("/generate")}>⚡ Generate New Quiz</button>
-                    <button className="btn btn-outline" onClick={() => navigate("/study")}>📚 Study Mode</button>
-                    <button className="btn btn-outline" onClick={() => navigate("/test")}>✏️ Test Mode</button>
+                    <button className="btn btn-primary" style={{ minHeight: "44px" }} onClick={() => navigate("/generate")}>⚡ Generate New Quiz</button>
+                    <button className="btn btn-outline" style={{ minHeight: "44px" }} onClick={() => navigate("/study")}>📚 Study Mode</button>
+                    <button className="btn btn-outline" style={{ minHeight: "44px" }} onClick={() => navigate("/test")}>✏️ Test Mode</button>
                 </div>
 
-                {/* ── Charts Row ──────────────────────────────────────────── */}
+                {/* ── Charts Row ────────────────────────────────────────── */}
                 {scoreHistory.length >= 2 && (
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1.25rem", marginBottom: "1.75rem" }} className="charts-row">
+                    <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: "1.25rem", marginBottom: "1.75rem" }} className="charts-row">
 
                         {/* Animated bar chart */}
                         <div className="card" style={{ padding: "1.25rem" }}>
