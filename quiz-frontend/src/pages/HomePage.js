@@ -1,6 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+function useIsMobile(bp = 768) {
+    const [m, setM] = useState(() => window.innerWidth <= bp);
+    useEffect(() => { const fn = () => setM(window.innerWidth <= bp); window.addEventListener("resize", fn); return () => window.removeEventListener("resize", fn); }, [bp]);
+    return m;
+}
+
 // Animated number counter — counts up when scrolled into view
 function useCountUp(target, duration = 1400) {
     const [count, setCount] = useState(0);
@@ -43,7 +49,7 @@ function StatItem({ num, suffix, divisor, label, borderRight }) {
     const { count, ref } = useCountUp(num);
     const display = divisor > 1 ? Math.floor(count / divisor) + suffix : count + suffix;
     return (
-        <div ref={ref} style={{
+        <div ref={ref} className="stat-item-cell" style={{
             textAlign: "center", padding: "0 2rem",
             borderRight: borderRight ? "1px solid var(--border)" : "none",
         }}>
@@ -91,9 +97,10 @@ const FOOTER_LINKS = {
 };
 
 export default function HomePage() {
-    const navigate = useNavigate();
-    const token = localStorage.getItem("token");
-    const isGuest = localStorage.getItem("isGuest") === "true";
+    const navigate  = useNavigate();
+    const isMobile  = useIsMobile(768);
+    const token     = localStorage.getItem("token");
+    const isGuest   = localStorage.getItem("isGuest") === "true";
 
     return (
         <div className="page-fade" style={{ background: "var(--bg)", minHeight: "calc(100vh - 60px)" }}>
@@ -101,8 +108,11 @@ export default function HomePage() {
             {/* ── HERO ──────────────────────────────── */}
             <section style={{
                 maxWidth: "1100px", margin: "0 auto",
-                padding: "5rem 2rem 4rem",
-                display: "grid", gridTemplateColumns: "1fr 1fr", gap: "3rem", alignItems: "center",
+                padding: isMobile ? "2.5rem 1.25rem 2rem" : "5rem 2rem 4rem",
+                display: "grid",
+                gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
+                gap: isMobile ? "2rem" : "3rem",
+                alignItems: "center",
             }}>
                 <div>
                     <div style={{
@@ -115,7 +125,8 @@ export default function HomePage() {
                         ✦ NEXT-GEN LEARNING
                     </div>
                     <h1 style={{
-                        fontSize: "3.1rem", fontWeight: 900, lineHeight: 1.12,
+                        fontSize: isMobile ? "2rem" : "3.1rem",
+                        fontWeight: 900, lineHeight: 1.15,
                         color: "var(--navy)", letterSpacing: "-.04em", marginBottom: "1rem",
                     }}>
                         Transform PDFs into{" "}
@@ -126,20 +137,22 @@ export default function HomePage() {
                     <p style={{ fontSize: ".95rem", color: "var(--text-muted)", lineHeight: 1.75, marginBottom: "2rem", maxWidth: "420px" }}>
                         AI-powered adaptive learning that turns your study materials into interactive quizzes in seconds. Boost your retention with precision-engineered questions.
                     </p>
-                    <div style={{ display: "flex", gap: ".75rem", flexWrap: "wrap" }}>
-                        <button className="btn btn-primary" style={{ padding: ".75rem 1.875rem", fontSize: ".95rem" }}
+                    <div style={{ display: "flex", gap: ".75rem", flexWrap: "wrap", flexDirection: isMobile ? "column" : "row" }}>
+                        <button className="btn btn-primary"
+                            style={{ padding: ".75rem 1.875rem", fontSize: ".95rem", width: isMobile ? "100%" : undefined }}
                             onClick={() => navigate(token ? "/generate" : "/login")}>
                             ⚡ Start Generating
                         </button>
-                        <button className="btn btn-outline" style={{ padding: ".75rem 1.5rem", fontSize: ".95rem" }}
+                        <button className="btn btn-outline"
+                            style={{ padding: ".75rem 1.5rem", fontSize: ".95rem", width: isMobile ? "100%" : undefined }}
                             onClick={() => navigate("/about")}>
                             Learn More →
                         </button>
                     </div>
                 </div>
 
-                {/* Mockup card */}
-                <div style={{
+                {/* Mockup card — hidden on mobile */}
+                {!isMobile && <div style={{
                     background: "#fff", borderRadius: "16px", border: "1px solid var(--border)",
                     boxShadow: "0 16px 48px rgba(27,43,75,.12)", padding: "1.25rem", position: "relative",
                 }}>
@@ -167,25 +180,25 @@ export default function HomePage() {
                             </div>
                         </div>
                     ))}
-                </div>
+                </div>}
             </section>
 
             {/* ── STATS BAR ──────────────────────────── */}
             <section style={{ background: "#fff", borderTop: "1px solid var(--border)", borderBottom: "1px solid var(--border)" }}>
-                <div style={{ maxWidth: "820px", margin: "0 auto", padding: "2.5rem 2rem", display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: "0" }}>
+                <div className="stats-bar-grid" style={{ maxWidth: "820px", margin: "0 auto", padding: isMobile ? "1.5rem 1rem" : "2.5rem 2rem", display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3,1fr)", gap: isMobile ? "0" : "0" }}>
                     {STATS_CONFIG.map((stat, i) => (
-                        <StatItem key={stat.label} {...stat} borderRight={i < STATS_CONFIG.length - 1} />
+                        <StatItem key={stat.label} {...stat} borderRight={!isMobile && i < STATS_CONFIG.length - 1} />
                     ))}
                 </div>
             </section>
 
             {/* ── HOW IT WORKS ─────────────────────── */}
-            <section style={{ maxWidth: "1100px", margin: "0 auto", padding: "5rem 2rem" }}>
-                <h2 style={{ fontSize: "1.75rem", fontWeight: 800, textAlign: "center", color: "var(--navy)", letterSpacing: "-.03em", marginBottom: ".5rem" }}>How It Works</h2>
-                <p style={{ textAlign: "center", color: "var(--text-muted)", fontSize: ".9rem", marginBottom: "3rem" }}>
+            <section style={{ maxWidth: "1100px", margin: "0 auto", padding: isMobile ? "3rem 1.25rem" : "5rem 2rem" }}>
+                <h2 style={{ fontSize: isMobile ? "1.35rem" : "1.75rem", fontWeight: 800, textAlign: "center", color: "var(--navy)", letterSpacing: "-.03em", marginBottom: ".5rem" }}>How It Works</h2>
+                <p style={{ textAlign: "center", color: "var(--text-muted)", fontSize: ".9rem", marginBottom: isMobile ? "1.5rem" : "3rem" }}>
                     Master any subject in three simple steps using our advanced AI engine.
                 </p>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: "1.25rem" }}>
+                <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3,1fr)", gap: "1.25rem" }}>
                     {HOW_IT_WORKS.map(({ icon, num, desc }) => (
                         <div key={num} className="card" style={{ padding: "2rem", textAlign: "center" }}>
                             <div style={{ fontSize: "2rem", marginBottom: "1rem" }}>{icon}</div>
@@ -197,13 +210,13 @@ export default function HomePage() {
             </section>
 
             {/* ── DIFFICULTY LEVELS ─────────────────── */}
-            <section style={{ background: "#fff", padding: "5rem 2rem" }}>
+            <section style={{ background: "#fff", padding: isMobile ? "3rem 1.25rem" : "5rem 2rem" }}>
                 <div style={{ maxWidth: "1100px", margin: "0 auto" }}>
-                    <h2 style={{ fontSize: "1.75rem", fontWeight: 800, textAlign: "center", color: "var(--navy)", letterSpacing: "-.03em", marginBottom: ".5rem" }}>Choose Your Challenge</h2>
-                    <p style={{ textAlign: "center", color: "var(--text-muted)", fontSize: ".9rem", marginBottom: "3rem" }}>
+                    <h2 style={{ fontSize: isMobile ? "1.35rem" : "1.75rem", fontWeight: 800, textAlign: "center", color: "var(--navy)", letterSpacing: "-.03em", marginBottom: ".5rem" }}>Choose Your Challenge</h2>
+                    <p style={{ textAlign: "center", color: "var(--text-muted)", fontSize: ".9rem", marginBottom: isMobile ? "1.5rem" : "3rem" }}>
                         Our AI tailors the complexity of questions to match your current learning stage.
                     </p>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: "1.25rem" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3,1fr)", gap: "1.25rem" }}>
                         {DIFFICULTIES.map(({ tag, label, emoji, desc, bullets, color, bg }) => (
                             <div key={label} className="card" style={{ padding: "2rem", cursor: "pointer" }}
                                 onClick={() => navigate(token ? "/generate" : "/login")}>
