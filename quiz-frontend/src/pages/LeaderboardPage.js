@@ -11,6 +11,13 @@ export default function LeaderboardPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
     const myUsername = localStorage.getItem("username") || "";
+    const [isMobile, setIsMobile] = useState(() => window.innerWidth <= 640);
+
+    useEffect(() => {
+        const fn = () => setIsMobile(window.innerWidth <= 640);
+        window.addEventListener("resize", fn);
+        return () => window.removeEventListener("resize", fn);
+    }, []);
 
     useEffect(() => {
         API.get("/quiz/leaderboard")
@@ -22,7 +29,7 @@ export default function LeaderboardPage() {
     if (loading) return <div className="page" style={{ background: "var(--bg)" }}><Loader text="Loading leaderboard..." /></div>;
 
     return (
-        <div style={{ background: "var(--bg)", minHeight: "calc(100vh - 60px)", padding: "2rem 1.5rem" }}>
+        <div style={{ background: "var(--bg)", minHeight: "calc(100vh - 60px)", padding: isMobile ? "1.5rem 1rem" : "2rem 1.5rem" }}>
             <div style={{ maxWidth: "700px", margin: "0 auto" }}>
                 <div style={{ textAlign: "center", marginBottom: "2.5rem" }}>
                     <div style={{ fontSize: "2.5rem", marginBottom: ".5rem" }}>🏆</div>
@@ -44,20 +51,23 @@ export default function LeaderboardPage() {
                     <div>
                         {/* Top 3 podium */}
                         {entries.length >= 3 && (
-                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "1rem", marginBottom: "2rem", alignItems: "flex-end" }}>
-                                {[entries[1], entries[0], entries[2]].map((e, i) => {
-                                    const heights = ["75px", "100px", "60px"];
-                                    const rank = i === 1 ? 1 : i === 0 ? 2 : 3;
+                            <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr 1fr", gap: "1rem", marginBottom: "2rem", alignItems: isMobile ? "stretch" : "flex-end" }}>
+                                {(isMobile ? [entries[0], entries[1], entries[2]] : [entries[1], entries[0], entries[2]]).map((e, i) => {
+                                    const heights = isMobile ? ["auto", "auto", "auto"] : ["75px", "100px", "60px"];
+                                    const rank = isMobile ? i + 1 : (i === 1 ? 1 : i === 0 ? 2 : 3);
                                     const col = rank === 1 ? "#F59E0B" : rank === 2 ? "#9CA3AF" : "#CD7C2F";
                                     return e ? (
                                         <div key={e.username} className="card" style={{
-                                            textAlign: "center", padding: "1rem .75rem",
+                                            textAlign: "center", padding: isMobile ? ".875rem" : "1rem .75rem",
                                             borderTop: `3px solid ${col}`,
-                                            height: heights[i], display: "flex", flexDirection: "column",
-                                            justifyContent: "flex-end", minHeight: heights[i],
+                                            display: "flex", flexDirection: isMobile ? "row" : "column",
+                                            justifyContent: isMobile ? "space-between" : "flex-end",
+                                            alignItems: isMobile ? "center" : undefined,
+                                            minHeight: heights[i],
+                                            gap: isMobile ? ".5rem" : 0,
                                         }}>
                                             <div style={{ fontSize: "1.25rem" }}>{MEDALS[rank - 1]}</div>
-                                            <div style={{ fontWeight: 800, fontSize: ".85rem", color: "var(--navy)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                            <div style={{ fontWeight: 800, fontSize: isMobile ? ".9rem" : ".85rem", color: "var(--navy)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: isMobile ? 1 : undefined, textAlign: isMobile ? "left" : "center", padding: isMobile ? "0 .5rem" : 0 }}>
                                                 {e.username === myUsername ? "You 👈" : e.username}
                                             </div>
                                             <div style={{ fontWeight: 900, fontSize: "1.1rem", color: col }}>{e.percentage}%</div>
