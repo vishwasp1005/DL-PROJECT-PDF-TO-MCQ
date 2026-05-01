@@ -1,6 +1,7 @@
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from core.generator import generate_quiz_from_text
+from core.generator import generate_quiz_from_text, split_into_chunks
 from db.database import get_db
 from db.models import Question, User, QuizSession
 from core.security import verify_token
@@ -9,6 +10,7 @@ from typing import List
 from pypdf import PdfReader
 import json
 import io
+import asyncio
 
 router = APIRouter()
 
@@ -60,10 +62,11 @@ async def generate_quiz(
     if not text.strip():
         raise HTTPException(status_code=400, detail="No readable text found in PDF")
 
-    # ─────────────────────────────────────────────────────────
-    # Cap num_questions to what the LLM can reliably generate
-    # Rule: ~1 question per 150 words of text, max 30 per call
-    # ─────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
+    # Cap num_questions to what the chunked parallel generator can produce.
+    # With parallel chunk generation, large PDFs can now comfortably support
+    # 80-100 MCQs.  Formula: ~1 Q per 60 words, hard-capped at 100.
+    # ─────────────────────────────────────────────────────────────────────────
     word_count = len(text.split())
     if word_count < 200:
         max_q = 5
@@ -72,9 +75,9 @@ async def generate_quiz(
     elif word_count < 1000:
         max_q = 20
     elif word_count < 2000:
-        max_q = 30
+        max_q = 40
     else:
-        max_q = min(40, word_count // 80)   # ~1 per 80 words, hard-capped at 40
+        max_q = min(100, word_count // 60)   # ~1 per 60 words, hard-capped at 100
 
     # Never let the user request more than the text can support
     capped_questions = min(num_questions, max_q)
@@ -140,6 +143,7 @@ async def generate_quiz(
         })
 
     return {
+        "chunk_count": len(split_into_chunks(text)),
         "quiz_session_id": quiz_session.id,
         "generated_by": current_user.username,
         "max_questions": max_q,
@@ -180,9 +184,9 @@ async def analyze_pdf(
     elif word_count < 1000:
         max_q = 20
     elif word_count < 2000:
-        max_q = 30
+        max_q = 40
     else:
-        max_q = min(40, word_count // 80)
+        max_q = min(100, word_count // 60)
 
     # Simple difficulty detection from word complexity
     words = text.split()
@@ -203,13 +207,19 @@ async def analyze_pdf(
         if len(topics) >= 8:
             break
 
+    # Calculate chunk count for frontend progress estimation
+    chunk_count = len(split_into_chunks(text))
+
     return {
         "word_count": word_count,
         "char_count": char_count,
         "max_questions": max_q,
         "detected_difficulty": difficulty,
         "topics": topics,
+        "chunk_count": chunk_count,
+        "estimated_batches": chunk_count,
     }
+
 
 
 # =========================
