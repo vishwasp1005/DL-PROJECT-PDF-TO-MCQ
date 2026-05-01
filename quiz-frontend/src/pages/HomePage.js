@@ -1,12 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-function useIsMobile(bp = 768) {
-    const [m, setM] = useState(() => window.innerWidth <= bp);
-    useEffect(() => { const fn = () => setM(window.innerWidth <= bp); window.addEventListener("resize", fn); return () => window.removeEventListener("resize", fn); }, [bp]);
-    return m;
-}
-
 // Animated number counter — counts up when scrolled into view
 function useCountUp(target, duration = 1400) {
     const [count, setCount] = useState(0);
@@ -40,25 +34,19 @@ function useCountUp(target, duration = 1400) {
 
 // Stats with animation config
 const STATS_CONFIG = [
-    { num: 10000, suffix: "K+", divisor: 1000, label: "Questions Generated" },
-    { num: 500,   suffix: "+",  divisor: 1,    label: "Active Daily Users"  },
-    { num: 95,    suffix: "%",  divisor: 1,    label: "Accuracy Rate"       },
+    { num: 10000, suffix: "K+", divisor: 1000, label: "Questions Generated", icon: "📝" },
+    { num: 500,   suffix: "+",  divisor: 1,    label: "Active Daily Users",  icon: "👥" },
+    { num: 95,    suffix: "%",  divisor: 1,    label: "Accuracy Rate",       icon: "🎯" },
 ];
 
-function StatItem({ num, suffix, divisor, label, borderRight }) {
+function StatItem({ num, suffix, divisor, label, icon }) {
     const { count, ref } = useCountUp(num);
     const display = divisor > 1 ? Math.floor(count / divisor) + suffix : count + suffix;
     return (
-        <div ref={ref} className="stat-item-cell" style={{
-            textAlign: "center", padding: "0 2rem",
-            borderRight: borderRight ? "1px solid var(--border)" : "none",
-        }}>
-            <div style={{ fontSize: "2.2rem", fontWeight: 900, color: "var(--navy)", letterSpacing: "-.04em", lineHeight: 1 }}>
-                {display}
-            </div>
-            <div style={{ fontSize: ".68rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".1em", color: "var(--text-light)", marginTop: ".35rem" }}>
-                {label}
-            </div>
+        <div ref={ref} className="stat-card-home">
+            <div className="stat-card-home-icon">{icon}</div>
+            <div className="stat-card-home-value">{display}</div>
+            <div className="stat-card-home-label">{label}</div>
         </div>
     );
 }
@@ -98,70 +86,46 @@ const FOOTER_LINKS = {
 
 export default function HomePage() {
     const navigate  = useNavigate();
-    const isMobile  = useIsMobile(768);
     const token     = localStorage.getItem("token");
     const isGuest   = localStorage.getItem("isGuest") === "true";
 
     return (
         <div className="page-fade" style={{ background: "var(--bg)", minHeight: "calc(100vh - 60px)" }}>
 
-            {/* ── HERO ──────────────────────────────── */}
-            <section style={{
-                maxWidth: "1100px", margin: "0 auto",
-                padding: isMobile ? "2.5rem 1.25rem 2rem" : "5rem 2rem 4rem",
-                display: "grid",
-                gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
-                gap: isMobile ? "2rem" : "3rem",
-                alignItems: "center",
-            }}>
-                <div>
-                    <div style={{
-                        display: "inline-flex", alignItems: "center", gap: ".4rem",
-                        background: "var(--navy-muted)", color: "var(--navy)",
-                        padding: ".25rem .75rem", borderRadius: "999px",
-                        fontSize: ".68rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".1em",
-                        marginBottom: "1.25rem",
-                    }}>
+            {/* ── HERO ──────────────────────────── */}
+            <section className="hero-section">
+                <div className="hero-content">
+                    <div className="hero-eyebrow">
                         ✦ NEXT-GEN LEARNING
                     </div>
-                    <h1 style={{
-                        fontSize: isMobile ? "2rem" : "3.1rem",
-                        fontWeight: 900, lineHeight: 1.15,
-                        color: "var(--navy)", letterSpacing: "-.04em", marginBottom: "1rem",
-                    }}>
+                    <h1 className="hero-headline">
                         Transform PDFs into{" "}
                         <span className="text-gradient" style={{ display: "inline-block" }}>
                             Smart MCQs
                         </span>
                     </h1>
-                    <p style={{ fontSize: ".95rem", color: "var(--text-muted)", lineHeight: 1.75, marginBottom: "2rem", maxWidth: "420px" }}>
+                    <p className="hero-description">
                         AI-powered adaptive learning that turns your study materials into interactive quizzes in seconds. Boost your retention with precision-engineered questions.
                     </p>
-                    <div style={{ display: "flex", gap: ".75rem", flexWrap: "wrap", flexDirection: isMobile ? "column" : "row" }}>
-                        <button className="btn btn-primary"
-                            style={{ padding: ".75rem 1.875rem", fontSize: ".95rem", width: isMobile ? "100%" : undefined }}
+                    <div className="hero-cta">
+                        <button className="btn btn-primary hero-btn-primary"
                             onClick={() => navigate(token ? "/generate" : "/login")}>
                             ⚡ Start Generating
                         </button>
-                        <button className="btn btn-outline"
-                            style={{ padding: ".75rem 1.5rem", fontSize: ".95rem", width: isMobile ? "100%" : undefined }}
+                        <button className="btn btn-outline hero-btn-outline"
                             onClick={() => navigate("/about")}>
                             Learn More →
                         </button>
                     </div>
                 </div>
 
-                {/* Mockup card — hidden on mobile */}
-                {!isMobile && <div style={{
-                    background: "#fff", borderRadius: "16px", border: "1px solid var(--border)",
-                    boxShadow: "0 16px 48px rgba(27,43,75,.12)", padding: "1.25rem", position: "relative",
-                }}>
+                {/* Mockup card — CSS-hidden on mobile via .hero-mockup */}
+                <div className="hero-mockup">
                     <div style={{ display: "flex", gap: ".3rem", marginBottom: "1rem" }}>
                         {["#EF4444", "#F59E0B", "#10B981"].map(c => (
                             <div key={c} style={{ width: "10px", height: "10px", borderRadius: "50%", background: c }} />
                         ))}
                     </div>
-                    {/* Fake question preview */}
                     {[
                         { q: "What is the time complexity of binary search?", a: "O(log n)" },
                         { q: "Which data structure uses LIFO?", a: "Stack" },
@@ -169,7 +133,7 @@ export default function HomePage() {
                         <div key={i} style={{ marginBottom: ".75rem", padding: ".875rem", background: "var(--surface)", borderRadius: "8px", border: "1px solid var(--border)" }}>
                             <div style={{ fontSize: ".75rem", fontWeight: 600, color: "var(--text-primary)", marginBottom: ".5rem" }}>{item.q}</div>
                             <div style={{ display: "flex", gap: ".4rem", flexWrap: "wrap" }}>
-                                {["O(n)", item.a, "O(n²)", "O(1)"].sort(() => Math.random() - .5).map((opt, j) => (
+                                {["O(n)", item.a, "O(n²)", "O(1)"].map((opt, j) => (
                                     <div key={j} style={{
                                         padding: ".25rem .7rem", borderRadius: "6px", fontSize: ".68rem", fontWeight: 600,
                                         background: opt === item.a ? "var(--success-bg)" : "var(--border)",
@@ -180,45 +144,45 @@ export default function HomePage() {
                             </div>
                         </div>
                     ))}
-                </div>}
+                </div>
             </section>
 
-            {/* ── STATS BAR ──────────────────────────── */}
-            <section style={{ background: "#fff", borderTop: "1px solid var(--border)", borderBottom: "1px solid var(--border)" }}>
-                <div className="stats-bar-grid" style={{ maxWidth: "820px", margin: "0 auto", padding: isMobile ? "1.5rem 1rem" : "2.5rem 2rem", display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3,1fr)", gap: isMobile ? "0" : "0" }}>
-                    {STATS_CONFIG.map((stat, i) => (
-                        <StatItem key={stat.label} {...stat} borderRight={!isMobile && i < STATS_CONFIG.length - 1} />
+            {/* ── STATS CARDS ────────────────────── */}
+            <section className="stats-section">
+                <div className="stats-cards-grid">
+                    {STATS_CONFIG.map(stat => (
+                        <StatItem key={stat.label} {...stat} />
                     ))}
                 </div>
             </section>
 
             {/* ── HOW IT WORKS ─────────────────────── */}
-            <section style={{ maxWidth: "1100px", margin: "0 auto", padding: isMobile ? "3rem 1.25rem" : "5rem 2rem" }}>
-                <h2 style={{ fontSize: isMobile ? "1.35rem" : "1.75rem", fontWeight: 800, textAlign: "center", color: "var(--navy)", letterSpacing: "-.03em", marginBottom: ".5rem" }}>How It Works</h2>
-                <p style={{ textAlign: "center", color: "var(--text-muted)", fontSize: ".9rem", marginBottom: isMobile ? "1.5rem" : "3rem" }}>
+            <section className="how-section">
+                <h2 className="section-heading">How It Works</h2>
+                <p className="section-subheading">
                     Master any subject in three simple steps using our advanced AI engine.
                 </p>
-                <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3,1fr)", gap: "1.25rem" }}>
+                <div className="how-cards-grid">
                     {HOW_IT_WORKS.map(({ icon, num, desc }) => (
-                        <div key={num} className="card" style={{ padding: "2rem", textAlign: "center" }}>
-                            <div style={{ fontSize: "2rem", marginBottom: "1rem" }}>{icon}</div>
-                            <div style={{ fontWeight: 700, fontSize: "1rem", color: "var(--navy)", marginBottom: ".5rem" }}>{num}</div>
-                            <div style={{ fontSize: ".85rem", color: "var(--text-muted)", lineHeight: 1.7 }}>{desc}</div>
+                        <div key={num} className="card how-card">
+                            <div className="how-card-icon">{icon}</div>
+                            <div className="how-card-title">{num}</div>
+                            <div className="how-card-desc">{desc}</div>
                         </div>
                     ))}
                 </div>
             </section>
 
             {/* ── DIFFICULTY LEVELS ─────────────────── */}
-            <section style={{ background: "#fff", padding: isMobile ? "3rem 1.25rem" : "5rem 2rem" }}>
+            <section className="difficulty-section">
                 <div style={{ maxWidth: "1100px", margin: "0 auto" }}>
-                    <h2 style={{ fontSize: isMobile ? "1.35rem" : "1.75rem", fontWeight: 800, textAlign: "center", color: "var(--navy)", letterSpacing: "-.03em", marginBottom: ".5rem" }}>Choose Your Challenge</h2>
-                    <p style={{ textAlign: "center", color: "var(--text-muted)", fontSize: ".9rem", marginBottom: isMobile ? "1.5rem" : "3rem" }}>
+                    <h2 className="section-heading">Choose Your Challenge</h2>
+                    <p className="section-subheading">
                         Our AI tailors the complexity of questions to match your current learning stage.
                     </p>
-                    <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3,1fr)", gap: "1.25rem" }}>
+                    <div className="difficulty-grid">
                         {DIFFICULTIES.map(({ tag, label, emoji, desc, bullets, color, bg }) => (
-                            <div key={label} className="card" style={{ padding: "2rem", cursor: "pointer" }}
+                            <div key={label} className="card difficulty-card"
                                 onClick={() => navigate(token ? "/generate" : "/login")}>
                                 <div style={{
                                     display: "inline-block", padding: ".2rem .6rem",
