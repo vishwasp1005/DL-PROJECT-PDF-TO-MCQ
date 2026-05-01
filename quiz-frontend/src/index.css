@@ -1675,3 +1675,249 @@ html, body { overflow-x: hidden; }
     grid-template-columns: 1fr !important;
   }
 }
+
+/* ══════════════════════════════════════════════════
+   HOMEPAGE — CSS-first responsive (NO JS isMobile)
+   ══════════════════════════════════════════════════ */
+
+/* ── Hero Section ── */
+.hero-section {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 4rem 1.25rem 3rem;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3rem;
+  align-items: center;
+}
+
+.hero-content { display: flex; flex-direction: column; }
+
+.hero-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+  background: var(--navy-muted);
+  color: var(--navy);
+  padding: .3rem .85rem;
+  border-radius: 999px;
+  font-size: .68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  margin-bottom: 1.25rem;
+  width: fit-content;
+}
+
+.hero-headline {
+  font-size: 3rem;
+  font-weight: 900;
+  line-height: 1.12;
+  color: var(--navy);
+  letter-spacing: -.04em;
+  margin-bottom: 1rem;
+}
+
+.hero-description {
+  font-size: .95rem;
+  color: var(--text-muted);
+  line-height: 1.75;
+  margin-bottom: 2rem;
+  max-width: 420px;
+}
+
+.hero-cta {
+  display: flex;
+  gap: .75rem;
+  flex-wrap: wrap;
+}
+
+.hero-btn-primary { padding: .75rem 1.875rem; font-size: .95rem; }
+.hero-btn-outline  { padding: .75rem 1.5rem;  font-size: .95rem; }
+
+.hero-mockup {
+  background: #fff;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  box-shadow: 0 16px 48px rgba(27,43,75,.12);
+  padding: 1.25rem;
+}
+
+/* ── Stats Section — Card-based layout ── */
+.stats-section {
+  background: #fff;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: 2.5rem 1.25rem;
+}
+
+.stats-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.25rem;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.stat-card-home {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.75rem 1.5rem;
+  text-align: center;
+  box-shadow: var(--shadow);
+  transition: transform .2s, box-shadow .2s;
+}
+
+.stat-card-home:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-hover);
+}
+
+.stat-card-home-icon { font-size: 2rem; margin-bottom: .75rem; }
+.stat-card-home-value {
+  font-size: 2.5rem;
+  font-weight: 900;
+  color: var(--navy);
+  letter-spacing: -.04em;
+  line-height: 1;
+}
+.stat-card-home-label {
+  font-size: .68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  color: var(--text-light);
+  margin-top: .4rem;
+}
+
+/* ── How It Works ── */
+.how-section {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 5rem 1.25rem;
+}
+
+.section-heading {
+  font-size: 1.75rem;
+  font-weight: 800;
+  text-align: center;
+  color: var(--navy);
+  letter-spacing: -.03em;
+  margin-bottom: .5rem;
+}
+
+.section-subheading {
+  text-align: center;
+  color: var(--text-muted);
+  font-size: .9rem;
+  margin-bottom: 3rem;
+  line-height: 1.65;
+}
+
+.how-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.25rem;
+}
+
+.how-card { padding: 2rem; text-align: center; cursor: default; }
+.how-card-icon { font-size: 2.25rem; margin-bottom: 1rem; }
+.how-card-title { font-weight: 700; font-size: 1rem; color: var(--navy); margin-bottom: .5rem; }
+.how-card-desc  { font-size: .85rem; color: var(--text-muted); line-height: 1.7; }
+
+/* ── Difficulty Section ── */
+.difficulty-section {
+  background: #fff;
+  padding: 5rem 1.25rem;
+}
+
+.difficulty-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.25rem;
+}
+
+.difficulty-card { padding: 2rem; cursor: pointer; }
+
+/* ── StudyPage: export row ── */
+.export-row {
+  display: flex;
+  gap: .625rem;
+  flex-wrap: wrap;
+}
+
+/* ── StudyPage: flashcard navigation ── */
+.flashcard-nav {
+  display: flex;
+  gap: .625rem;
+}
+
+/* ── StudyPage: header row (title + filter) ── */
+.study-header-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+/* ── Tab bar: always scrollable on mobile ── */
+.tab-bar-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scroll-snap-type: x mandatory;
+  /* Hide scrollbar visually but keep functional */
+  scrollbar-width: none;
+}
+.tab-bar-scroll::-webkit-scrollbar { display: none; }
+.tab-bar-scroll .tab-btn {
+  flex-shrink: 0;
+  scroll-snap-align: start;
+  white-space: nowrap;
+}
+
+/* ══════════════════════════════════════════════════
+   MOBILE OVERRIDES for new HomePage classes
+   ══════════════════════════════════════════════════ */
+
+@media (max-width: 768px) {
+  /* Hero: single column */
+  .hero-section {
+    grid-template-columns: 1fr;
+    padding: 2.5rem 1.25rem 2rem;
+    gap: 2rem;
+  }
+  /* Hide mockup on mobile */
+  .hero-mockup { display: none; }
+  /* Hero headline scales down */
+  .hero-headline { font-size: 2rem; }
+  /* Stats: 1 column on mobile */
+  .stats-section { padding: 1.75rem 1.25rem; }
+  .stats-cards-grid { grid-template-columns: 1fr; gap: .875rem; }
+  /* How it works: 1 col */
+  .how-section { padding: 3rem 1.25rem; }
+  .how-cards-grid { grid-template-columns: 1fr; }
+  /* Difficulty: 1 col */
+  .difficulty-section { padding: 3rem 1.25rem; }
+  .difficulty-grid { grid-template-columns: 1fr; }
+  /* Section headings */
+  .section-heading { font-size: 1.35rem; }
+  .section-subheading { margin-bottom: 1.5rem; }
+  /* Hero CTA: stack buttons full-width */
+  .hero-cta { flex-direction: column; width: 100%; }
+  .hero-btn-primary,
+  .hero-btn-outline { width: 100%; justify-content: center; }
+  /* Study export row: grid 3-col */
+  .export-row { display: grid; grid-template-columns: repeat(3, 1fr); }
+  /* Flashcard nav: grid 3-col */
+  .flashcard-nav { display: grid; grid-template-columns: repeat(3, 1fr); }
+  /* Study header: stack */
+  .study-header-row { flex-direction: column; align-items: flex-start; gap: .75rem; }
+}
+
+@media (max-width: 480px) {
+  .hero-headline { font-size: 1.7rem; }
+  .stats-cards-grid { grid-template-columns: 1fr; }
+  /* Export row: 1 col on tiny phone */
+  .export-row { grid-template-columns: 1fr; }
+}
