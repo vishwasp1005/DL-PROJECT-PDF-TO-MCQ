@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import API from "../api";
-import useIsMobile from "../hooks/useIsMobile";
 
 const PDF_META_KEY = "qf_last_pdf"; // localStorage key for persisted PDF metadata
 
@@ -27,7 +26,6 @@ export function clearPdfMeta() {
 export default function GeneratePage() {
     const navigate    = useNavigate();
     const fileInputRef= useRef();
-    const isMobile    = useIsMobile();
 
     // ── Restore from localStorage on first mount ──────────────────────────────
     const saved = loadPdfMeta();
@@ -47,6 +45,7 @@ export default function GeneratePage() {
     const [loading, setLoading] = useState(false);
     const [extracting, setExtracting] = useState(false);
     const [progress, setProgress] = useState(0);
+    const [genPhase, setGenPhase] = useState(0); // 0=idle 1=parse 2=chunk 3=generate 4=save
     const [error, setError] = useState("");
     const [generated, setGenerated] = useState(null);
     const [detailedExp, setDetailedExp] = useState(saved?.detailedExp ?? true);
@@ -186,10 +185,29 @@ export default function GeneratePage() {
     const handleGenerate = async () => {
         if (!file) { setError("Please select a PDF file first."); return; }
         if (isGuest) { setError("Guest mode: please sign up to use AI generation."); return; }
-        setError(""); setLoading(true); setProgress(10);
+        setError(""); setLoading(true); setProgress(5); setGenPhase(1);
 
-        // Fake progress animation
-        const tick = setInterval(() => setProgress(p => p < 85 ? p + 5 : p), 600);
+        // Phase-aware progress simulation
+        // Phase 1 (5→20): Parsing / analysing PDF
+        // Phase 2 (20→35): Chunking text
+        // Phase 3 (35→88): AI generating (long, slow)
+        // Phase 4 (88→100): Saving to DB
+        let tick;
+        const runPhase = (from, to, phase, durationMs) => {
+            setGenPhase(phase);
+            const steps = Math.ceil((to - from) / 3);
+            const interval = durationMs / steps;
+            let current = from;
+            tick = setInterval(() => {
+                current = Math.min(current + 3, to);
+                setProgress(current);
+                if (current >= to) clearInterval(tick);
+            }, interval);
+        };
+
+        runPhase(5, 20, 1, 800);   // Parse PDF
+        setTimeout(() => runPhase(20, 35, 2, 600), 900);  // Chunking
+        setTimeout(() => runPhase(35, 88, 3, 35000), 1600); // AI generate
 
         try {
             const formData = new FormData();
@@ -205,6 +223,7 @@ export default function GeneratePage() {
             );
 
             setProgress(100);
+            setGenPhase(4);
             clearInterval(tick);
 
             const questions = res.data.questions || [];
@@ -237,7 +256,7 @@ export default function GeneratePage() {
                 "Generation failed. Try fewer questions or re-upload the PDF."
             );
         } finally {
-            setTimeout(() => { setLoading(false); setProgress(0); }, 500);
+            setTimeout(() => { setLoading(false); setProgress(0); setGenPhase(0); }, 600);
         }
     };
 
@@ -247,9 +266,17 @@ export default function GeneratePage() {
     };
 
 
+    // Generation phase labels for the step UI
+    const GEN_STEPS = [
+        { id: 1, label: "Parsing PDF" },
+        { id: 2, label: "Chunking" },
+        { id: 3, label: "AI Generating" },
+        { id: 4, label: "Saving" },
+    ];
+
     return (
         <div style={{ background: "var(--bg)", minHeight: "calc(100vh - 60px)", paddingBottom: "4rem" }}>
-            <div style={{ maxWidth: "780px", margin: "0 auto", padding: isMobile ? "1.5rem 1rem" : "2.5rem 1.5rem" }}>
+            <div className="generate-page-inner">
 
                 {/* Breadcrumb */}
                 <div className="breadcrumb" style={{ marginBottom: ".75rem" }}>
@@ -337,7 +364,7 @@ export default function GeneratePage() {
 
                                 )}
                             </div>
-                            <button className="btn btn-outline" style={{ fontSize: ".78rem", padding: ".4rem .9rem", flexShrink: 0 }}
+                            <button className="btn btn-outline btn-sm" style={{ flexShrink: 0 }}
                                 onClick={handleClearPdf}>
                                 Change
                             </button>
@@ -429,8 +456,8 @@ export default function GeneratePage() {
                             <span>{maxQ} QUESTIONS</span>
                         </div>
 
-                        {/* Question type — multi-select checkboxes */}
-                        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: ".875rem" }}>
+                        {/* Question type — multi-select */}
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: ".875rem" }}>
                             {Q_TYPES.map(({ id, label, desc }) => (
                                 <label key={id} style={{
                                     display: "flex", alignItems: "center", gap: ".75rem",
@@ -494,26 +521,51 @@ export default function GeneratePage() {
                 {/* ── GENERATE BUTTON ── */}
                 {file && (
                     <button className="btn btn-primary btn-full"
-                        style={{ padding: ".875rem", fontSize: isMobile ? "1rem" : ".95rem", marginBottom: "1rem", minHeight: "52px" }}
+                        style={{ fontSize: ".95rem", marginBottom: "1.25rem", minHeight: "52px" }}
                         disabled={loading || extracting || isGuest}
                         onClick={handleGenerate}>
-                        {loading ? "Generating..." : "✦ Generate Study Questions"}
+                        {loading ? "✦ Generating…" : "✦ Generate Study Questions"}
                     </button>
                 )}
 
-                {/* Progress bar */}
+                {/* Premium progress / step UI */}
                 {loading && (
-                    <div style={{ marginBottom: "1.5rem" }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: ".72rem", fontWeight: 700, color: "var(--text-muted)", marginBottom: ".4rem", textTransform: "uppercase", letterSpacing: ".08em" }}>
-                            <span>🔄 ANALYZING CONTENT...</span>
-                            <span>{progress}%</span>
+                    <div className="gen-progress-wrap">
+                        <div className="gen-progress-header">
+                            <div className="gen-progress-title">
+                                <span style={{ animation: "spin .8s linear infinite", display: "inline-block", fontSize: "1rem" }}>⚙</span>
+                                {genPhase === 1 && "Parsing PDF content…"}
+                                {genPhase === 2 && "Splitting into chunks…"}
+                                {genPhase === 3 && "AI generating questions…"}
+                                {genPhase === 4 && "Saving to your library…"}
+                                {genPhase === 0 && "Initialising…"}
+                            </div>
+                            <div className="gen-progress-pct">{progress}%</div>
                         </div>
-                        <div className="progress-bar-wrapper">
-                            <div className="progress-bar-fill" style={{ width: `${progress}%`, background: "var(--navy)" }} />
+
+                        <div className="gen-progress-track">
+                            <div className="gen-progress-fill" style={{ width: `${progress}%` }} />
                         </div>
-                        <p style={{ fontSize: ".75rem", color: "var(--text-light)", textAlign: "center", marginTop: ".5rem" }}>
-                            This usually takes less than 60 seconds depending on document length.
-                        </p>
+
+                        <div className="gen-steps">
+                            {GEN_STEPS.map(step => {
+                                const state = genPhase > step.id ? "done" : genPhase === step.id ? "active" : "";
+                                return (
+                                    <div key={step.id} className={`gen-step${state ? " " + state : ""}`}>
+                                        <div className="gen-step-dot" />
+                                        {state === "done" ? "✓ " : ""}{step.label}
+                                    </div>
+                                );
+                            })}
+                        </div>
+
+                        <div className="gen-eta">
+                            {genPhase <= 2
+                                ? "Analysing document structure…"
+                                : genPhase === 3
+                                    ? `Generating ${numQuestions} questions in parallel — usually under 30s`
+                                    : "Almost done!"}
+                        </div>
                     </div>
                 )}
 
@@ -552,17 +604,12 @@ export default function GeneratePage() {
                             </div>
                             <div className="badge badge-success">Ready</div>
                         </div>
-                        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: ".625rem" }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: ".625rem" }}>
                             <button className="btn btn-primary" onClick={() => goTo("/study")}>📚 Study Mode</button>
                             <button className="btn btn-outline" onClick={() => { setGenerated(null); setFile(null); setWordCount(null); setCharCount(null); setDetectedDiff(null); setTopics([]); }}>🔄 Regenerate MCQ</button>
                         </div>
                     </div>
                 )}
-            </div>
-
-            {/* Footer note */}
-            <div style={{ textAlign: "center", fontSize: ".72rem", color: "var(--text-light)", padding: "1rem 2rem" }}>
-                © 2024 QuizGenius AI. Empowering learning through intelligent assessment. · Design by Vishwas Patel
             </div>
         </div>
     );
