@@ -1,76 +1,50 @@
 """
-core/generator.py — Parallel Chunked MCQ Generator
-====================================================
-Architecture:
-  1. Split PDF text into ~1000-token (≈4000-char) chunks
-  2. Assign MCQ count proportionally per chunk
-  3. Fire all chunk → LLM calls concurrently via asyncio.gather
-  4. Merge + deduplicate results
+core/generator.py — Scalable Parallel Chunked MCQ Generator
+=============================================================
+Architecture (v2 — large-PDF safe):
 
-This reduces latency for large PDFs from O(N) sequential → O(1) parallel.
-Rate-limit headroom: each chunk sends ≤12K chars, well under Groq's context window.
+  1. Text is fed in as a full string (already extracted page-by-page in quiz.py)
+  2. core/chunker.py splits it into 500-1500 word sentence-safe chunks with overlap
+  3. Chunks are processed in PARALLEL BATCHES of MAX_PARALLEL workers
+     (prevents Groq rate-limit hammering on large PDFs)
+  4. Each chunk → LLM call with retry + exponential backoff
+  5. Results are merged, deduplicated, and normalised
+  6. If a chunk fails after retries → it is SKIPPED and logged (never crashes)
+
+Token safety: Each chunk is capped at MAX_CHUNK_CHARS characters before
+sending to Groq, which keeps every request well within the model's context window.
 """
 
 import json
 import asyncio
 import re
-from typing import List
+import logging
+from typing import List, Optional
+
 from groq import Groq
 from core.config import GROQ_API_KEY
+from core.chunker import chunk_text_list
 
-# llama-3.3-70b is more reliable for structured JSON output
-MODEL_NAME = "llama-3.3-70b-versatile"
+logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LLM Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+MODEL_NAME    = "llama-3.3-70b-versatile"
+MAX_PARALLEL  = 4          # concurrent Groq calls (stay under rate limits)
+MAX_RETRIES   = 2          # retry each failed chunk this many times
+RETRY_BASE_S  = 2          # exponential backoff base (seconds)
+MAX_CHUNK_CHARS = 6000     # hard cap per chunk sent to LLM (~1500 tokens)
 
 client = Groq(api_key=GROQ_API_KEY)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Chunking
+# Chunking (delegated to core/chunker.py)
 # ─────────────────────────────────────────────────────────────────────────────
-CHARS_PER_TOKEN     = 4          # rough heuristic (English text)
-TARGET_CHUNK_TOKENS = 1000       # tokens per chunk
-TARGET_CHUNK_CHARS  = TARGET_CHUNK_TOKENS * CHARS_PER_TOKEN   # 4000 chars
-MAX_CHUNKS          = 12         # never spawn more than 12 parallel calls
 
-
-def split_into_chunks(text: str, chunk_chars: int = TARGET_CHUNK_CHARS) -> List[str]:
-    """
-    Split text into overlapping chunks by paragraph boundaries.
-    Overlap of one paragraph at the end of each chunk gives the LLM context
-    continuity so questions don't get cut off mid-topic.
-    """
-    # Split on blank lines (paragraphs)
-    paragraphs = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
-
-    chunks: List[str] = []
-    current: List[str] = []
-    current_len = 0
-
-    for para in paragraphs:
-        if current_len + len(para) > chunk_chars and current:
-            chunks.append("\n\n".join(current))
-            # Overlap: keep the last paragraph of the previous chunk
-            current = [current[-1], para]
-            current_len = len(current[-2]) + len(para)
-        else:
-            current.append(para)
-            current_len += len(para)
-
-    if current:
-        chunks.append("\n\n".join(current))
-
-    # Guard against excessively many chunks (rate-limit safety)
-    if len(chunks) > MAX_CHUNKS:
-        # Merge adjacent chunks until we're within limit
-        while len(chunks) > MAX_CHUNKS:
-            merged = []
-            for i in range(0, len(chunks), 2):
-                if i + 1 < len(chunks):
-                    merged.append(chunks[i] + "\n\n" + chunks[i + 1])
-                else:
-                    merged.append(chunks[i])
-            chunks = merged
-
-    return chunks
+def split_into_chunks(text: str) -> List[str]:
+    """Public interface used by quiz.py for chunk_count reporting."""
+    return chunk_text_list(text)
 
 
 def distribute_questions(total: int, num_chunks: int) -> List[int]:
@@ -83,9 +57,11 @@ def distribute_questions(total: int, num_chunks: int) -> List[int]:
 # ─────────────────────────────────────────────────────────────────────────────
 # Prompt builder
 # ─────────────────────────────────────────────────────────────────────────────
+
 def build_prompt(context: str, num_questions: int, q_type: str, difficulty: str) -> str:
     level = {"Easy": "BASIC recall", "Medium": "COMPREHENSION", "Hard": "ANALYSIS"}.get(difficulty, "COMPREHENSION")
-    ctx   = context[:12000]   # cap per chunk (already chunked, but safety guard)
+    # Enforce per-chunk char cap so we never exceed LLM token limits
+    ctx   = context[:MAX_CHUNK_CHARS]
 
     if q_type == "TF":
         return f"""Generate {num_questions} True/False questions at {level} level.
@@ -155,6 +131,7 @@ Context:
 # ─────────────────────────────────────────────────────────────────────────────
 # JSON extraction (robust bracket-counting)
 # ─────────────────────────────────────────────────────────────────────────────
+
 def extract_json(text: str) -> List[dict]:
     # 1. Direct parse
     try:
@@ -267,20 +244,24 @@ def _normalize_correct(correct) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # Single chunk → LLM call (with retry + exponential backoff)
 # ─────────────────────────────────────────────────────────────────────────────
+
 async def _call_llm(
     chunk_text: str,
     num_questions: int,
     q_type: str,
     difficulty: str,
     chunk_idx: int,
-    retries: int = 2,
+    retries: int = MAX_RETRIES,
 ) -> List[dict]:
-    """Call Groq for a single chunk. Retries up to `retries` times on failure."""
+    """
+    Send one chunk to Groq. Retries up to `retries` times with exponential backoff.
+    Returns empty list (never raises) after exhausting retries — the chunk is skipped.
+    """
     prompt = build_prompt(chunk_text, num_questions, q_type, difficulty)
 
     for attempt in range(retries + 1):
         try:
-            print(f"[Chunk {chunk_idx}] Generating {num_questions} {q_type} questions (attempt {attempt + 1})")
+            logger.info(f"[Chunk {chunk_idx}] Generating {num_questions} {q_type} questions (attempt {attempt + 1})")
             response = await asyncio.to_thread(
                 client.chat.completions.create,
                 model=MODEL_NAME,
@@ -313,24 +294,58 @@ async def _call_llm(
                     q["correct"] = _normalize_correct(q["correct"])
                     valid.append(q)
 
-            print(f"[Chunk {chunk_idx}] Got {len(valid)} valid questions")
+            logger.info(f"[Chunk {chunk_idx}] Got {len(valid)} valid questions")
             return valid
 
         except Exception as e:
             if attempt < retries:
-                wait = 2 ** attempt   # 1s → 2s → 4s
-                print(f"[Chunk {chunk_idx}] Error (attempt {attempt + 1}): {e}. Retrying in {wait}s…")
+                wait = RETRY_BASE_S ** attempt
+                logger.warning(f"[Chunk {chunk_idx}] Error (attempt {attempt + 1}): {e}. Retrying in {wait}s…")
                 await asyncio.sleep(wait)
             else:
-                print(f"[Chunk {chunk_idx}] Failed after {retries + 1} attempts: {e}")
-                raise RuntimeError(f"Groq API error on chunk {chunk_idx}: {e}") from e
+                logger.error(f"[Chunk {chunk_idx}] Failed after {retries + 1} attempts — skipping: {e}")
+                return []   # skip, never crash
 
     return []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Batched parallel execution (respects MAX_PARALLEL to avoid rate limits)
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _run_in_batches(tasks_args: list, q_type: str, difficulty: str) -> List[dict]:
+    """
+    Execute LLM tasks in batches of MAX_PARALLEL.
+    Each task_arg is (chunk_text, num_questions, chunk_idx).
+    Returns merged list of all questions from all batches.
+    """
+    all_questions: List[dict] = []
+
+    for batch_start in range(0, len(tasks_args), MAX_PARALLEL):
+        batch = tasks_args[batch_start: batch_start + MAX_PARALLEL]
+        logger.info(f"[Batch] Processing chunks {batch_start}–{batch_start + len(batch) - 1} in parallel")
+
+        tasks = [
+            _call_llm(chunk_text, num_q, q_type, difficulty, chunk_idx)
+            for chunk_text, num_q, chunk_idx in batch
+        ]
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for i, result in enumerate(results):
+            chunk_idx = batch[i][2]
+            if isinstance(result, Exception):
+                logger.error(f"[Chunk {chunk_idx}] Unexpected exception in gather: {result}")
+            elif isinstance(result, list):
+                all_questions.extend(result)
+
+    return all_questions
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Core public API — parallel chunked generation
 # ─────────────────────────────────────────────────────────────────────────────
+
 async def _generate_single(
     text: str,
     num_questions: int,
@@ -338,37 +353,33 @@ async def _generate_single(
     difficulty: str,
 ) -> List[dict]:
     """
-    Split `text` into chunks, generate MCQs in parallel, then merge results.
-    Falls back to a single call if the text fits in one chunk.
+    Split text into sentence-safe chunks, generate MCQs in parallel batches,
+    then merge + deduplicate results.
     """
-    chunks = split_into_chunks(text)
-    print(f"\n====== PARALLEL GENERATION: {num_questions} {q_type} ({difficulty}) | {len(chunks)} chunk(s) ======")
+    chunks = chunk_text_list(text)
+    logger.info(f"\n====== PARALLEL GENERATION: {num_questions} {q_type} ({difficulty}) | {len(chunks)} chunk(s) ======")
+
+    if not chunks:
+        logger.warning("No chunks produced — text may be empty or too short")
+        return []
 
     if len(chunks) == 1:
-        # Small PDF — no need for parallelism
+        # Small PDF — single call, no batching overhead
         return await _call_llm(chunks[0], num_questions, q_type, difficulty, chunk_idx=0)
 
-    # Distribute questions across chunks proportionally
+    # Distribute questions proportionally across chunks
     q_per_chunk = distribute_questions(num_questions, len(chunks))
 
-    # Fire all chunk requests concurrently
-    tasks = [
-        _call_llm(chunk, q_count, q_type, difficulty, chunk_idx=i)
+    # Build task args list (filter out zero-question chunks)
+    tasks_args = [
+        (chunk, q_count, i)
         for i, (chunk, q_count) in enumerate(zip(chunks, q_per_chunk))
         if q_count > 0
     ]
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    all_questions = await _run_in_batches(tasks_args, q_type, difficulty)
 
-    # Merge + skip failed chunks (log them)
-    all_questions: List[dict] = []
-    for i, result in enumerate(results):
-        if isinstance(result, Exception):
-            print(f"[Chunk {i}] Skipped due to error: {result}")
-        else:
-            all_questions.extend(result)
-
-    # Deduplicate by question text (in case overlapping chunks produce same Q)
+    # Deduplicate by normalised question text
     seen: set = set()
     deduped: List[dict] = []
     for q in all_questions:
@@ -377,13 +388,14 @@ async def _generate_single(
             seen.add(key)
             deduped.append(q)
 
-    print(f"====== DONE: {len(deduped)} unique questions from {len(chunks)} chunks ======\n")
+    logger.info(f"====== DONE: {len(deduped)} unique questions from {len(chunks)} chunks ======\n")
     return deduped
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Multi-type wrapper (MCQ + TF + FIB mixed)
 # ─────────────────────────────────────────────────────────────────────────────
+
 async def generate_quiz_from_text(
     text: str,
     num_questions: int,
@@ -391,19 +403,19 @@ async def generate_quiz_from_text(
     difficulty: str,
 ) -> List[dict]:
     """
-    Supports comma-separated q_type like 'MCQ,TF,FIB' for mixed generation.
-    Each type is generated in parallel across chunks for maximum speed.
+    Public entry point. Supports comma-separated q_type like 'MCQ,TF,FIB'.
+    Each type is generated via parallel chunked pipeline.
     """
     types = [t.strip().upper() for t in q_type.split(",") if t.strip()]
     if len(types) <= 1:
         return await _generate_single(text, num_questions, q_type.upper(), difficulty)
 
-    # Distribute questions across types evenly
-    base    = num_questions // len(types)
-    extras  = num_questions % len(types)
-    counts  = [base + (1 if i < extras else 0) for i in range(len(types))]
+    # Distribute questions across question types
+    base   = num_questions // len(types)
+    extras = num_questions % len(types)
+    counts = [base + (1 if i < extras else 0) for i in range(len(types))]
 
-    # Run each type's generation concurrently (on top of per-chunk parallelism)
+    # Run each type's chunked generation concurrently
     type_tasks = [
         _generate_single(text, count, t, difficulty)
         for t, count in zip(types, counts)
@@ -415,7 +427,7 @@ async def generate_quiz_from_text(
     all_questions: List[dict] = []
     for i, result in enumerate(type_results):
         if isinstance(result, Exception):
-            print(f"[Type {types[i]}] Failed: {result}")
+            logger.error(f"[Type {types[i]}] Failed: {result}")
         else:
             all_questions.extend(result)
 
