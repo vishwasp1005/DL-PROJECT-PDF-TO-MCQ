@@ -1,51 +1,64 @@
+/**
+ * LoginPage (v2)
+ * ==============
+ * Changes:
+ *   - Uses useAuthContext().login() instead of calling API directly
+ *     → ensures AuthContext state is updated (no stale isLoggedIn)
+ *   - Clears old localStorage keys that v1 used (backward compat)
+ *   - Guest login also goes through AuthContext
+ *   - Reads qf_session_expired flag (set by apiClient on hard logout)
+ */
 import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import API from "../api";
+import { useAuthContext } from "../context/AuthContext";
 
 export default function LoginPage() {
-    const navigate = useNavigate();
-    const [username, setUsername] = useState("");
-    const [password, setPassword] = useState("");
-    const [error, setError] = useState("");
-    const [loading, setLoading] = useState(false);
+    const navigate                = useNavigate();
+    const { login, startGuest }   = useAuthContext();
+
+    const [username,       setUsername]       = useState("");
+    const [password,       setPassword]       = useState("");
+    const [error,          setError]          = useState("");
+    const [loading,        setLoading]        = useState(false);
     const [sessionExpired, setSessionExpired] = useState(false);
 
-    // Check if redirected here due to expired session
+    // Show banner if kicked here by the interceptor
     useEffect(() => {
         if (sessionStorage.getItem("qf_session_expired")) {
             setSessionExpired(true);
             sessionStorage.removeItem("qf_session_expired");
+        }
+
+        // Migrate old token key names (v1 → v2)
+        const oldToken = localStorage.getItem("token");
+        if (oldToken) {
+            localStorage.removeItem("token");
+            localStorage.removeItem("username");
+            localStorage.removeItem("isGuest");
         }
     }, []);
 
     const handleLogin = async (e) => {
         e.preventDefault();
         if (!username || !password) { setError("Please fill in all fields."); return; }
-        setLoading(true); setError("");
+        setLoading(true);
+        setError("");
+
         try {
-            const form = new URLSearchParams();
-            form.append("username", username);
-            form.append("password", password);
-            const res = await API.post("/auth/login", form, {
-                headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            });
-            localStorage.setItem("token", res.data.access_token);
-            localStorage.setItem("username", username);
-            localStorage.removeItem("isGuest");
-            // Clear session-specific data on fresh login
-            localStorage.removeItem("qg_questions");   // clears Study Mode MCQs
-            localStorage.removeItem("qf_last_pdf");    // clears Generate page PDF state
+            await login(username, password);
+            // Clear stale session data from previous user
+            localStorage.removeItem("qg_questions");
+            localStorage.removeItem("qf_last_pdf");
             navigate("/home");
-        } catch (e) {
-            setError(e.response?.data?.detail || "Invalid credentials.");
-        } finally { setLoading(false); }
+        } catch (err) {
+            setError(err.response?.data?.detail || "Invalid credentials.");
+        } finally {
+            setLoading(false);
+        }
     };
 
     const handleGuest = () => {
-        localStorage.setItem("token", "guest_token");
-        localStorage.setItem("isGuest", "true");
-        localStorage.setItem("username", "Guest");
-        // Clear any previous session data
+        startGuest();
         localStorage.removeItem("qg_questions");
         localStorage.removeItem("qf_last_pdf");
         navigate("/home");
@@ -65,7 +78,7 @@ export default function LoginPage() {
                     <div className="auth-tagline">Sign in to continue learning</div>
                 </div>
 
-                {/* Session expired notice */}
+                {/* Session-expired notice */}
                 {sessionExpired && (
                     <div style={{
                         background: "rgba(245,158,11,.12)", border: "1px solid rgba(245,158,11,.4)",
@@ -81,16 +94,30 @@ export default function LoginPage() {
                 <form onSubmit={handleLogin}>
                     <div className="form-group">
                         <label className="form-label">Username</label>
-                        <input className="form-input" placeholder="Enter username" value={username}
-                            onChange={e => setUsername(e.target.value)} autoFocus />
+                        <input
+                            className="form-input"
+                            placeholder="Enter username"
+                            value={username}
+                            onChange={e => setUsername(e.target.value)}
+                            autoFocus
+                        />
                     </div>
                     <div className="form-group">
                         <label className="form-label">Password</label>
-                        <input className="form-input" type="password" placeholder="Enter password" value={password}
-                            onChange={e => setPassword(e.target.value)} />
+                        <input
+                            className="form-input"
+                            type="password"
+                            placeholder="Enter password"
+                            value={password}
+                            onChange={e => setPassword(e.target.value)}
+                        />
                     </div>
-                    <button className="btn btn-primary btn-full" style={{ marginTop: ".5rem" }} disabled={loading}>
-                        {loading ? "Signing in..." : "Sign In"}
+                    <button
+                        className="btn btn-primary btn-full"
+                        style={{ marginTop: ".5rem" }}
+                        disabled={loading}
+                    >
+                        {loading ? "Signing in…" : "Sign In"}
                     </button>
                 </form>
 
