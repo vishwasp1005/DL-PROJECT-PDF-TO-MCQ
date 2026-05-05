@@ -1,24 +1,16 @@
-import sqlite3
+"""
+migrate_db.py — Add refresh_tokens table (v2 migration)
+========================================================
+Run once after deploying v2:
+    python migrate_db.py
 
-conn = sqlite3.connect("quizgenius.db")
-c = conn.cursor()
+Safe to run multiple times (uses CREATE TABLE IF NOT EXISTS via SQLAlchemy).
+"""
 
-columns_to_add = [
-    ("score",           "ALTER TABLE quiz_sessions ADD COLUMN score INTEGER"),
-    ("total_questions", "ALTER TABLE quiz_sessions ADD COLUMN total_questions INTEGER"),
-    ("percentage",      "ALTER TABLE quiz_sessions ADD COLUMN percentage REAL"),
-]
+from db.database import engine, Base
+from db.models import User, QuizSession, Question, RefreshToken   # noqa: F401
 
-for col_name, sql in columns_to_add:
-    try:
-        c.execute(sql)
-        print(f"[OK] Added column: {col_name}")
-    except sqlite3.OperationalError as e:
-        if "duplicate column name" in str(e):
-            print(f"[SKIP] Column already exists: {col_name}")
-        else:
-            raise
-
-conn.commit()
-conn.close()
-print("\n[DONE] Migration complete!")
+print("Running database migration...")
+Base.metadata.create_all(bind=engine)
+print("✅ Database tables created/updated successfully.")
+print("   Tables: users, quiz_sessions, questions, refresh_tokens")
