@@ -1,7 +1,10 @@
 /**
  * quizService — all /quiz/* API calls.
- * Pages import these helpers instead of calling apiClient directly,
- * which makes mocking/testing and endpoint changes trivial.
+ *
+ * v2 changes (large-PDF support):
+ *   - generateQuiz accepts an onUploadProgress callback for real-time upload %
+ *   - Explicit per-call timeout overrides (analyze=30s, generate=360s)
+ *   - userMessage from apiClient interceptor is surfaced to callers
  */
 import apiClient from "./apiClient";
 
@@ -9,12 +12,30 @@ import apiClient from "./apiClient";
 export async function analyzePDF(file) {
     const form = new FormData();
     form.append("file", file);
-    const res = await apiClient.post("/quiz/analyze", form);
-    return res.data; // { word_count, char_count, max_questions, difficulty, topics }
+    const res = await apiClient.post("/quiz/analyze", form, {
+        timeout: 30_000,   // /analyze is fast — 30s is plenty
+    });
+    return res.data; // { word_count, char_count, max_questions, difficulty, topics, page_count, size_mb }
 }
 
 // ── Quiz Generation ───────────────────────────────────────────────────────────
-export async function generateQuiz({ file, numQuestions, qType, difficulty, topic }) {
+/**
+ * @param {Object}   params
+ * @param {File}     params.file
+ * @param {number}   params.numQuestions
+ * @param {string}   params.qType        e.g. "MCQ" | "TF" | "FIB" | "MCQ,TF"
+ * @param {string}   params.difficulty   "Easy" | "Medium" | "Hard"
+ * @param {string}   [params.topic]
+ * @param {Function} [params.onUploadProgress]  called with { loaded, total }
+ */
+export async function generateQuiz({
+    file,
+    numQuestions,
+    qType,
+    difficulty,
+    topic,
+    onUploadProgress,
+}) {
     const form = new FormData();
     form.append("file", file);
     form.append("num_questions", numQuestions);
@@ -24,9 +45,15 @@ export async function generateQuiz({ file, numQuestions, qType, difficulty, topi
     const topicParam = topic ? `&topic=${encodeURIComponent(topic)}` : "";
     const res = await apiClient.post(
         `/quiz/generate?num_questions=${numQuestions}&q_type=${qType}&difficulty=${difficulty}${topicParam}`,
-        form
+        form,
+        {
+            timeout: 360_000,   // 6-minute hard cap for large PDFs
+            onUploadProgress: onUploadProgress
+                ? (evt) => onUploadProgress({ loaded: evt.loaded, total: evt.total })
+                : undefined,
+        }
     );
-    return res.data; // { questions, quiz_session_id }
+    return res.data; // { questions, quiz_session_id, chunk_count, word_count, max_questions }
 }
 
 // ── Submit Attempt ────────────────────────────────────────────────────────────
