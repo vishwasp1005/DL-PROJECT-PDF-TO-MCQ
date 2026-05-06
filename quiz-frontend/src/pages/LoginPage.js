@@ -1,20 +1,18 @@
 /**
- * LoginPage (v2)
- * ==============
- * Changes:
- *   - Uses useAuthContext().login() instead of calling API directly
- *     → ensures AuthContext state is updated (no stale isLoggedIn)
- *   - Clears old localStorage keys that v1 used (backward compat)
- *   - Guest login also goes through AuthContext
- *   - Reads qf_session_expired flag (set by apiClient on hard logout)
+ * LoginPage.js
+ * =============
+ * - Uses AuthContext.login() (not direct API call) → state stays in sync
+ * - Migrates old v1 localStorage keys on first load
+ * - Shows session-expired banner when kicked here by the interceptor
+ * - Guest mode goes through AuthContext
  */
 import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuthContext } from "../context/AuthContext";
 
 export default function LoginPage() {
-    const navigate                = useNavigate();
-    const { login, startGuest }   = useAuthContext();
+    const navigate              = useNavigate();
+    const { login, startGuest } = useAuthContext();
 
     const [username,       setUsername]       = useState("");
     const [password,       setPassword]       = useState("");
@@ -22,16 +20,14 @@ export default function LoginPage() {
     const [loading,        setLoading]        = useState(false);
     const [sessionExpired, setSessionExpired] = useState(false);
 
-    // Show banner if kicked here by the interceptor
     useEffect(() => {
+        // Show banner when interceptor force-logged-out
         if (sessionStorage.getItem("qf_session_expired")) {
             setSessionExpired(true);
             sessionStorage.removeItem("qf_session_expired");
         }
-
-        // Migrate old token key names (v1 → v2)
-        const oldToken = localStorage.getItem("token");
-        if (oldToken) {
+        // Migrate v1 token keys
+        if (localStorage.getItem("token")) {
             localStorage.removeItem("token");
             localStorage.removeItem("username");
             localStorage.removeItem("isGuest");
@@ -46,7 +42,6 @@ export default function LoginPage() {
 
         try {
             await login(username, password);
-            // Clear stale session data from previous user
             localStorage.removeItem("qg_questions");
             localStorage.removeItem("qf_last_pdf");
             navigate("/home");
@@ -60,13 +55,13 @@ export default function LoginPage() {
     const handleGuest = () => {
         startGuest();
         localStorage.removeItem("qg_questions");
-        localStorage.removeItem("qf_last_pdf");
         navigate("/home");
     };
 
     return (
         <div className="page" style={{ background: "var(--bg)" }}>
             <div className="card card-sm">
+
                 {/* Logo */}
                 <div style={{ textAlign: "center", marginBottom: "1.75rem" }}>
                     <div style={{
@@ -78,7 +73,7 @@ export default function LoginPage() {
                     <div className="auth-tagline">Sign in to continue learning</div>
                 </div>
 
-                {/* Session-expired notice */}
+                {/* Session expired banner */}
                 {sessionExpired && (
                     <div style={{
                         background: "rgba(245,158,11,.12)", border: "1px solid rgba(245,158,11,.4)",
