@@ -1,3 +1,11 @@
+/**
+ * RegisterPage.js
+ * ================
+ * - Fixed: backend returns 201, not 200 — old check caused silent fail
+ * - Real-time inline field validation (mirrors backend rules)
+ * - Green success banner + auto-redirect instead of alert()
+ * - Exact error messages from backend surfaced to user
+ */
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import API from "../api";
@@ -16,56 +24,34 @@ export default function RegisterPage() {
         e.preventDefault();
         setError("");
 
-        // ── Frontend validation (mirrors backend rules exactly) ───────────────
-        if (!username.trim() || !password) {
-            setError("Please fill in all fields.");
-            return;
-        }
-        if (username.trim().length < 3) {
-            setError("Username must be at least 3 characters.");
-            return;
-        }
-        if (password.length < 6) {
-            setError("Password must be at least 6 characters.");
-            return;
-        }
-        if (password !== confirm) {
-            setError("Passwords do not match.");
-            return;
-        }
+        if (!username.trim() || !password) { setError("Please fill in all fields."); return; }
+        if (username.trim().length < 3)    { setError("Username must be at least 3 characters."); return; }
+        if (password.length < 6)           { setError("Password must be at least 6 characters."); return; }
+        if (password !== confirm)          { setError("Passwords do not match."); return; }
 
         setLoading(true);
 
         try {
-            await API.post("/auth/register", {
-                username: username.trim(),
-                password,
-            });
-
-            // ✅ Backend returns 201 — any 2xx means success
+            await API.post("/auth/register", { username: username.trim(), password });
+            // Backend returns 201 — any 2xx (no exception) = success
             setSuccess(true);
             setTimeout(() => navigate("/login"), 1800);
-
         } catch (err) {
-            const detail =
+            setError(
                 err.response?.data?.detail ||
                 err.response?.data?.message ||
-                "Registration failed. Please try again.";
-            setError(detail);
+                "Registration failed. Please try again."
+            );
         } finally {
             setLoading(false);
         }
     };
 
-    // Field-level helpers
+    // Inline validation state
     const usernameTouched = username.length > 0;
     const usernameInvalid = usernameTouched && username.trim().length < 3;
-
-    const passwordTouched = password.length > 0;
-    const passwordWeak    = passwordTouched && password.length < 6;
-
-    const confirmTouched  = confirm.length > 0;
-    const confirmMismatch = confirmTouched && confirm !== password;
+    const passwordWeak    = password.length > 0 && password.length < 6;
+    const confirmMismatch = confirm.length > 0 && confirm !== password;
 
     return (
         <div className="page" style={{ background: "var(--bg)" }}>
@@ -83,23 +69,19 @@ export default function RegisterPage() {
                     <div className="auth-tagline">Join QuizGenius AI for free</div>
                 </div>
 
-                {/* Success banner */}
+                {/* Success */}
                 {success && (
                     <div style={{
                         background: "rgba(16,185,129,.12)", border: "1px solid rgba(16,185,129,.4)",
                         borderRadius: "8px", padding: ".75rem 1rem", marginBottom: "1rem",
-                        fontSize: ".85rem", color: "#065f46", display: "flex", gap: ".5rem",
+                        fontSize: ".85rem", color: "#065f46",
                     }}>
                         ✅ Account created! Redirecting to login…
                     </div>
                 )}
 
-                {/* Error banner */}
-                {error && (
-                    <div className="alert alert-error" style={{ marginBottom: "1rem" }}>
-                        {error}
-                    </div>
-                )}
+                {/* Error */}
+                {error && <div className="alert alert-error" style={{ marginBottom: "1rem" }}>{error}</div>}
 
                 <form onSubmit={handleRegister} noValidate>
 
@@ -111,8 +93,8 @@ export default function RegisterPage() {
                             placeholder="At least 3 characters"
                             value={username}
                             onChange={e => { setUsername(e.target.value); setError(""); }}
-                            autoFocus
                             style={usernameInvalid ? { borderColor: "#ef4444" } : {}}
+                            autoFocus
                         />
                         {usernameInvalid && (
                             <div style={{ color: "#ef4444", fontSize: ".78rem", marginTop: "4px" }}>
@@ -139,7 +121,7 @@ export default function RegisterPage() {
                         )}
                     </div>
 
-                    {/* Confirm Password */}
+                    {/* Confirm */}
                     <div className="form-group">
                         <label className="form-label">Confirm Password</label>
                         <input
