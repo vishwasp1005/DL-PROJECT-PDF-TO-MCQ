@@ -1,8 +1,8 @@
 """
-db/models.py — SQLAlchemy Models (v2)
-======================================
-Adds RefreshToken model for server-side refresh token tracking.
-All existing models (User, QuizSession, Question) are preserved unchanged.
+db/models.py — SQLAlchemy Models
+==================================
+Added: RefreshToken model for server-side token tracking + revocation.
+Existing models (User, QuizSession, Question) are unchanged.
 """
 
 from sqlalchemy import Column, Integer, String, Float, ForeignKey, Text, DateTime, Boolean
@@ -21,22 +21,22 @@ class User(Base):
     username        = Column(String, unique=True, index=True)
     hashed_password = Column(String)
 
-    quiz_sessions   = relationship("QuizSession", back_populates="user")
-    refresh_tokens  = relationship("RefreshToken", back_populates="user", cascade="all, delete-orphan")
+    quiz_sessions  = relationship("QuizSession", back_populates="user")
+    refresh_tokens = relationship("RefreshToken", back_populates="user", cascade="all, delete-orphan")
 
 
 # =============================================================================
-# RefreshToken — server-side tracking for secure rotation + revocation
+# RefreshToken — server-side refresh token store
 # =============================================================================
 class RefreshToken(Base):
     __tablename__ = "refresh_tokens"
 
-    id          = Column(Integer, primary_key=True, index=True)
-    user_id     = Column(Integer, ForeignKey("users.id"), nullable=False)
-    token_hash  = Column(String, unique=True, index=True, nullable=False)   # SHA-256 of raw token
-    expires_at  = Column(DateTime, nullable=False)
-    created_at  = Column(DateTime, default=datetime.utcnow)
-    revoked     = Column(Boolean, default=False)
+    id         = Column(Integer, primary_key=True, index=True)
+    user_id    = Column(Integer, ForeignKey("users.id"), nullable=False)
+    token_hash = Column(String, unique=True, index=True, nullable=False)  # SHA-256 of raw token
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    revoked    = Column(Boolean, default=False)
 
     user = relationship("User", back_populates="refresh_tokens")
 
@@ -47,12 +47,12 @@ class RefreshToken(Base):
 class QuizSession(Base):
     __tablename__ = "quiz_sessions"
 
-    id             = Column(Integer, primary_key=True, index=True)
-    user_id        = Column(Integer, ForeignKey("users.id"))
-    created_at     = Column(DateTime, default=datetime.utcnow)
-    score          = Column(Integer, nullable=True)
-    total_questions= Column(Integer, nullable=True)
-    percentage     = Column(Float, nullable=True)
+    id              = Column(Integer, primary_key=True, index=True)
+    user_id         = Column(Integer, ForeignKey("users.id"))
+    created_at      = Column(DateTime, default=datetime.utcnow)
+    score           = Column(Integer, nullable=True)
+    total_questions = Column(Integer, nullable=True)
+    percentage      = Column(Float, nullable=True)
 
     user      = relationship("User", back_populates="quiz_sessions")
     questions = relationship("Question", back_populates="quiz_session")
