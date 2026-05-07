@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { useAuthContext } from "../context/AuthContext";
 
 // Animated number counter — counts up when scrolled into view
 function useCountUp(target, duration = 1400) {
@@ -86,8 +87,7 @@ const FOOTER_LINKS = {
 
 export default function HomePage() {
     const navigate  = useNavigate();
-    const token     = localStorage.getItem("token");
-    const isGuest   = localStorage.getItem("isGuest") === "true";
+    const { isLoggedIn, isGuest } = useAuthContext();
 
     return (
         <div className="page-fade" style={{ background: "var(--bg)", minHeight: "calc(100vh - 60px)" }}>
@@ -109,7 +109,7 @@ export default function HomePage() {
                     </p>
                     <div className="hero-cta">
                         <button className="btn btn-primary hero-btn-primary"
-                            onClick={() => navigate(token ? "/generate" : "/login")}>
+                            onClick={() => navigate(isLoggedIn ? "/generate" : "/login")}>
                             ⚡ Start Generating
                         </button>
                         <button className="btn btn-outline hero-btn-outline"
@@ -183,7 +183,7 @@ export default function HomePage() {
                     <div className="difficulty-grid">
                         {DIFFICULTIES.map(({ tag, label, emoji, desc, bullets, color, bg }) => (
                             <div key={label} className="card difficulty-card"
-                                onClick={() => navigate(token ? "/generate" : "/login")}>
+                                onClick={() => navigate(isLoggedIn ? "/generate" : "/login")}>
                                 <div style={{
                                     display: "inline-block", padding: ".2rem .6rem",
                                     background: bg, color, borderRadius: "999px",
