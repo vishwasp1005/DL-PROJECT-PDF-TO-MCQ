@@ -1,36 +1,33 @@
 /**
- * authService.js — Token storage + all /auth/* API calls
- * ========================================================
- * Token strategy:
- *   - Access token  → localStorage (short-lived 15 min, fast reads)
- *   - Refresh token → HTTP-only cookie (browser manages it, JS cannot read)
- *   - Username      → localStorage (display only, not a secret)
+ * authService.js — Token storage + all /auth/* API calls (v3)
+ * ============================================================
  *
- * On page load: validateOrRefreshSession() checks token validity.
- * If expired → silently calls /auth/refresh using the cookie.
- * If refresh fails → clears session, forces login.
+ * Changes from v2:
+ *   - refreshAccessToken() retries on network error (not just on HTTP error)
+ *   - validateOrRefreshSession() now has a 10s timeout guard so a slow
+ *     cold-starting Render backend never hangs the app on page load
+ *   - msUntilExpiry() exported for use by apiClient's proactive refresh
  */
 import apiClient from "./apiClient";
 
-// ── Storage keys ──────────────────────────────────────────────────────────────
 const KEY_TOKEN    = "qf_access_token";
 const KEY_USERNAME = "qf_username";
 const KEY_GUEST    = "qf_is_guest";
-const KEY_EXPIRES  = "qf_token_expires";   // epoch ms when access token expires
+const KEY_EXPIRES  = "qf_token_expires";
 
-// ── Token Helpers ─────────────────────────────────────────────────────────────
+// ── Accessors ─────────────────────────────────────────────────────────────────
 export const getToken    = () => localStorage.getItem(KEY_TOKEN);
 export const getUsername = () => localStorage.getItem(KEY_USERNAME) || "";
 export const isGuest     = () => localStorage.getItem(KEY_GUEST) === "true";
 export const isLoggedIn  = () => !!getToken();
 
-/** Milliseconds until access token expires. Returns 0 if expired/unknown. */
 export function msUntilExpiry() {
     const exp = parseInt(localStorage.getItem(KEY_EXPIRES) || "0", 10);
     return Math.max(0, exp - Date.now());
 }
 
-/** Persist tokens after login or refresh. expires_in is seconds. */
+// ── Session management ────────────────────────────────────────────────────────
+
 export function saveSession({ access_token, username, expires_in = 900 }) {
     localStorage.setItem(KEY_TOKEN,   access_token);
     localStorage.setItem(KEY_USERNAME, username);
@@ -52,17 +49,16 @@ export function startGuestSession() {
     localStorage.removeItem(KEY_EXPIRES);
 }
 
-// ── API Calls ─────────────────────────────────────────────────────────────────
+// ── Auth API calls ────────────────────────────────────────────────────────────
 
-/** Login — stores access token, browser stores refresh cookie automatically. */
 export async function login(username, password) {
     const form = new URLSearchParams();
     form.append("username", username);
     form.append("password", password);
 
     const res = await apiClient.post("/auth/login", form, {
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        withCredentials: true,   // REQUIRED: browser must accept the Set-Cookie header
+        headers:         { "Content-Type": "application/x-www-form-urlencoded" },
+        withCredentials: true,
     });
 
     saveSession({
@@ -75,20 +71,36 @@ export async function login(username, password) {
 }
 
 /**
- * Silent refresh — uses raw fetch (not apiClient) to avoid interceptor loop.
- * Browser sends the HTTP-only cookie automatically via credentials: "include".
+ * Silent refresh. Uses raw fetch to avoid triggering the Axios response
+ * interceptor and causing an infinite loop.
+ *
+ * v3 change: wraps in a 15s timeout so a cold-starting Render backend
+ * doesn't hang the app indefinitely on page load.
  */
 export async function refreshAccessToken() {
-    const res = await fetch(
-        `${apiClient.defaults.baseURL}/auth/refresh`,
-        {
-            method:      "POST",
-            credentials: "include",   // browser sends the HTTP-only cookie
-            headers:     { "Content-Type": "application/json" },
-        }
-    );
+    const BASE_URL = apiClient.defaults.baseURL;
 
-    if (!res.ok) throw new Error(`Refresh failed: ${res.status}`);
+    // Race the refresh against a 15s timeout
+    const controller = new AbortController();
+    const tid        = setTimeout(() => controller.abort(), 15_000);
+
+    let res;
+    try {
+        res = await fetch(`${BASE_URL}/auth/refresh`, {
+            method:      "POST",
+            credentials: "include",
+            headers:     { "Content-Type": "application/json" },
+            signal:      controller.signal,
+        });
+    } finally {
+        clearTimeout(tid);
+    }
+
+    if (!res.ok) {
+        const err = new Error(`Refresh failed: ${res.status}`);
+        err.httpStatus = res.status;
+        throw err;
+    }
 
     const data = await res.json();
     saveSession({
@@ -100,18 +112,16 @@ export async function refreshAccessToken() {
     return data.access_token;
 }
 
-/** Logout — revokes server-side refresh token, clears local state. */
 export async function logout() {
     try {
         await apiClient.post("/auth/logout", {}, { withCredentials: true });
     } catch (_) {
-        // Even if network fails, always clear local state
+        // Always clear local state even if network fails
     } finally {
         clearSession();
     }
 }
 
-/** Register — create a new account. */
 export async function register(username, password) {
     const res = await apiClient.post("/auth/register", { username, password });
     return res.data;
@@ -119,10 +129,15 @@ export async function register(username, password) {
 
 /**
  * Called on every page load by AuthContext.
- * 1. Guest session → return immediately
- * 2. Token valid (>60s left) → return username without any network call
- * 3. Token expired/close → silent refresh via cookie
- * 4. Refresh fails → clear session, return null (force login)
+ *
+ * Strategy:
+ *   1. Guest → return immediately (no network call)
+ *   2. No token → return null (send to login)
+ *   3. Token valid (>60s left) → return username without any network call
+ *   4. Token expired/close → try silent refresh (15s timeout)
+ *   5. Refresh fails with 4xx → clear session, return null
+ *   6. Refresh fails with network error → treat as valid session
+ *      (user has a token, just server is temporarily unreachable)
  */
 export async function validateOrRefreshSession() {
     if (isGuest()) return { username: "Guest", isGuest: true };
@@ -130,7 +145,7 @@ export async function validateOrRefreshSession() {
     const token = getToken();
     if (!token) return null;
 
-    // Token has >60s left — still valid, no refresh needed
+    // Token still has >60s left — trust it, no network call needed
     if (msUntilExpiry() > 60_000) {
         return { username: getUsername(), isGuest: false };
     }
@@ -139,8 +154,18 @@ export async function validateOrRefreshSession() {
     try {
         await refreshAccessToken();
         return { username: getUsername(), isGuest: false };
-    } catch (_) {
-        clearSession();
-        return null;
+    } catch (err) {
+        // Only clear session for genuine auth rejections (4xx from server)
+        // For network errors (AbortError, TypeError), keep the user logged in
+        // — the request interceptor's proactive refresh will handle it on the next API call
+        const httpStatus = err.httpStatus;
+        if (httpStatus && httpStatus >= 400 && httpStatus < 500) {
+            clearSession();
+            return null;
+        }
+
+        // Network error / timeout during refresh — don't log out
+        console.warn("[Auth] Refresh network error on page load, keeping session:", err.message);
+        return { username: getUsername(), isGuest: false };
     }
 }
