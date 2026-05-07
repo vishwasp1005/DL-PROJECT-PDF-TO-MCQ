@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
+import { useAuthContext } from "../context/AuthContext";
 import API from "../api";
 import { getScoreHistory, getBookmarks, clearScoreHistory } from "../utils/storage";
 import RecommendationCard from "../components/ai/RecommendationCard";
@@ -183,7 +184,7 @@ export default function DashboardPage() {
     const scoreHistory = getScoreHistory();
     const bookmarks = getBookmarks();
     const username = localStorage.getItem("username") || "User";
-    const isGuest = localStorage.getItem("isGuest") === "true";
+    const { isGuest } = useAuthContext();
 
     const totalTests = scoreHistory.length;
     const avgScore = totalTests ? Math.round(scoreHistory.reduce((s, h) => s + h.pct, 0) / totalTests * 10) / 10 : 0;
