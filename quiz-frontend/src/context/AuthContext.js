@@ -1,10 +1,16 @@
 /**
- * AuthContext.js — Global auth state provider
- * =============================================
- * - On mount: validateOrRefreshSession() → silent token check/renew
- * - `initializing`: true until auth check completes → prevents flash-logout
- * - Proactive refresh timer: fires 60s before access token expiry
- * - logout(): calls backend to revoke refresh token cookie
+ * AuthContext.js — Global auth state provider (v3)
+ * =================================================
+ *
+ * Changes from v2:
+ *   - Listens for the custom "qf:server-waking" event dispatched by apiClient
+ *     and exposes a `serverWaking` state so pages can show a friendly
+ *     "Server is waking up..." banner instead of a spinner that looks broken.
+ *   - proactiveRefresh: the timer now uses msUntilExpiry() at fire-time
+ *     (not at schedule-time) to avoid scheduling a refresh for an already-
+ *     refreshed token when multiple refreshes happen in quick succession.
+ *   - scheduleProactiveRefresh now reschedules after every successful refresh
+ *     so the chain is never broken across a long session.
  */
 import React, {
     createContext,
@@ -30,47 +36,84 @@ export function AuthProvider({ children }) {
     const [username,     setUsername]     = useState("");
     const [guest,        setGuest]        = useState(false);
     const [isLoggedIn,   setIsLoggedIn]   = useState(false);
-    const [initializing, setInitializing] = useState(true); // prevents redirect flash on refresh
+    const [initializing, setInitializing] = useState(true);
+    const [serverWaking, setServerWaking] = useState(false);  // NEW: Render cold-start flag
 
     const proactiveTimer = useRef(null);
 
-    // ── Proactive refresh: fires 60s before access token expires ─────────────
+    // ── Listen for server cold-start events from apiClient ───────────────────
+    useEffect(() => {
+        function onServerWaking(e) {
+            const { attempt, maxAttempts } = e.detail;
+            setServerWaking(true);
+            console.log(`[Auth] Server waking up (${attempt}/${maxAttempts})…`);
+        }
+        function onServerReady() {
+            setServerWaking(false);
+        }
+
+        window.addEventListener("qf:server-waking", onServerWaking);
+        window.addEventListener("qf:server-ready",  onServerReady);
+        return () => {
+            window.removeEventListener("qf:server-waking", onServerWaking);
+            window.removeEventListener("qf:server-ready",  onServerReady);
+        };
+    }, []);
+
+    // ── Proactive refresh: fires 90s before access token expires ─────────────
     const scheduleProactiveRefresh = useCallback(() => {
         if (proactiveTimer.current) clearTimeout(proactiveTimer.current);
 
         const msLeft = msUntilExpiry();
         if (msLeft <= 0) return;
 
-        const delay = Math.max(0, msLeft - 60_000); // 60s before expiry
+        // Schedule for 90s before expiry (gives time for 2 retries if first fails)
+        const delay = Math.max(0, msLeft - 90_000);
+
+        console.log(`[Auth] Proactive refresh scheduled in ${Math.round(delay / 1000)}s`);
 
         proactiveTimer.current = setTimeout(async () => {
+            // Re-check expiry at fire time (token may have been refreshed already)
+            if (msUntilExpiry() > 90_000) {
+                console.log("[Auth] Proactive refresh skipped — token already refreshed");
+                scheduleProactiveRefresh();
+                return;
+            }
+
             try {
+                console.log("[Auth] Proactive refresh firing…");
                 await refreshAccessToken();
-                scheduleProactiveRefresh(); // reschedule for the new token
-            } catch (_) {
-                // Interceptor handles the next 401 if proactive refresh fails
+                console.log("[Auth] Proactive refresh succeeded");
+                scheduleProactiveRefresh(); // Reschedule for the new token
+            } catch (e) {
+                console.warn("[Auth] Proactive refresh failed:", e.message);
+                // Request interceptor will handle it on next API call
             }
         }, delay);
     }, []);
 
-    // ── On every page load: validate or silently refresh ─────────────────────
+    // ── Auth hydration on page load ──────────────────────────────────────────
     useEffect(() => {
         let cancelled = false;
 
         async function init() {
+            console.log("[Auth] Hydrating session…");
             try {
                 const result = await validateOrRefreshSession();
                 if (cancelled) return;
 
                 if (result) {
+                    console.log("[Auth] Session valid —", result.username);
                     setUsername(result.username);
                     setGuest(result.isGuest || false);
                     setIsLoggedIn(true);
                     if (!result.isGuest) scheduleProactiveRefresh();
                 } else {
+                    console.log("[Auth] No valid session found");
                     setIsLoggedIn(false);
                 }
-            } catch (_) {
+            } catch (e) {
+                console.error("[Auth] Hydration error:", e.message);
                 if (!cancelled) setIsLoggedIn(false);
             } finally {
                 if (!cancelled) setInitializing(false);
@@ -81,12 +124,12 @@ export function AuthProvider({ children }) {
         return () => { cancelled = true; };
     }, [scheduleProactiveRefresh]);
 
-    // Cleanup timer on unmount
+    // Cleanup
     useEffect(() => () => {
         if (proactiveTimer.current) clearTimeout(proactiveTimer.current);
     }, []);
 
-    // ── Auth actions ──────────────────────────────────────────────────────────
+    // ── Actions ───────────────────────────────────────────────────────────────
 
     const login = useCallback(async (uname, password) => {
         const data = await _login(uname, password);
@@ -121,11 +164,11 @@ export function AuthProvider({ children }) {
         isGuest:     guest,
         isLoggedIn,
         initializing,
+        serverWaking,   // NEW — pages can show "Server waking up…" banner
         login,
         register,
         startGuest,
         logout,
-        // Backward compat: pages that read token from context
         token: isLoggedIn
             ? (guest ? "guest_token" : localStorage.getItem("qf_access_token"))
             : null,
