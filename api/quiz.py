@@ -34,9 +34,9 @@ router = APIRouter()
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
-MAX_FILE_SIZE_BYTES  = 20 * 1024 * 1024   # 20 MB hard limit
+MAX_FILE_SIZE_BYTES  = 25 * 1024 * 1024   # 25 MB hard limit (was 20MB)
 ANALYZE_MAX_CHARS    = 50_000             # cap for /analyze (fast path)
-GENERATE_TIMEOUT_S   = 300               # 5-minute timeout for /generate
+GENERATE_TIMEOUT_S   = 480               # 8-minute timeout (large PDFs need time)
 
 
 # =============================================================================
@@ -72,7 +72,7 @@ async def generate_quiz(
     if len(file_bytes) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(
             status_code=413,
-            detail=f"PDF too large ({len(file_bytes) // (1024*1024)}MB). Maximum allowed: 20MB."
+            detail=f"PDF too large ({len(file_bytes) // (1024*1024)}MB). Maximum allowed: 25MB."
         )
 
     # ── 2. Stream-extract text (page by page, never full string in memory) ────
@@ -182,7 +182,7 @@ async def analyze_pdf(
     if len(file_bytes) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(
             status_code=413,
-            detail=f"PDF too large ({len(file_bytes) // (1024*1024)}MB). Maximum allowed: 20MB."
+            detail=f"PDF too large ({len(file_bytes) // (1024*1024)}MB). Maximum allowed: 25MB."
         )
 
     # Extract only first ANALYZE_MAX_CHARS to keep /analyze fast on huge PDFs
