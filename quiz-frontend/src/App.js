@@ -26,6 +26,7 @@ import SharePage from "./pages/SharePage";
 import LeaderboardPage from "./pages/LeaderboardPage";
 import NotFoundPage from "./pages/NotFoundPage";
 
+import useServerWarmup from "./hooks/useServerWarmup";
 import "./index.css";
 
 const PAGE_TITLES = {
@@ -55,6 +56,9 @@ function TitleUpdater() {
 // AppShell is INSIDE BrowserRouter so Navbar + Routes share the same router context.
 // AuthProvider wraps everything so Navbar always reads from context, not localStorage.
 function AppShell() {
+  // Pre-warm the Render backend on page load so it's ready when user uploads
+  useServerWarmup();
+
   return (
     <AuthProvider>
       <ToastProvider>
