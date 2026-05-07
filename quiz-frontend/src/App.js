@@ -28,7 +28,6 @@ import NotFoundPage from "./pages/NotFoundPage";
 
 import "./index.css";
 
-// Page title updater — reads pathname and sets document.title
 const PAGE_TITLES = {
   "/home":       "Home — QuizGenius AI",
   "/generate":   "Generate Quiz — QuizGenius AI",
@@ -44,6 +43,7 @@ const PAGE_TITLES = {
   "/register":   "Create Account — QuizGenius AI",
 };
 
+// TitleUpdater must live INSIDE BrowserRouter so useLocation works
 function TitleUpdater() {
   const { pathname } = useLocation();
   React.useEffect(() => {
@@ -52,44 +52,56 @@ function TitleUpdater() {
   return null;
 }
 
+// AppShell is INSIDE BrowserRouter so Navbar + Routes share the same router context.
+// AuthProvider wraps everything so Navbar always reads from context, not localStorage.
+function AppShell() {
+  return (
+    <AuthProvider>
+      <ToastProvider>
+        <TitleUpdater />
+        <ShortcutModal />
+
+        {/*
+          Navbar is rendered OUTSIDE <Routes> — it never unmounts on route changes.
+          AuthContext hydrates first (see initializing state) so Navbar only renders
+          when auth state is confirmed, eliminating the flash-hide-show issue.
+        */}
+        <Navbar />
+
+        <Routes>
+          {/* Public */}
+          <Route path="/login"       element={<LoginPage />} />
+          <Route path="/register"    element={<RegisterPage />} />
+          <Route path="/share/:data" element={<SharePage />} />
+
+          {/* Protected — ProtectedRoute waits for initializing before redirecting */}
+          <Route path="/home"        element={<ProtectedRoute><HomePage /></ProtectedRoute>} />
+          <Route path="/dashboard"   element={<ProtectedRoute><DashboardPage /></ProtectedRoute>} />
+          <Route path="/generate"    element={<ProtectedRoute><GeneratePage /></ProtectedRoute>} />
+          <Route path="/quiz"        element={<ProtectedRoute><QuizPage /></ProtectedRoute>} />
+          <Route path="/result"      element={<ProtectedRoute><ResultPage /></ProtectedRoute>} />
+          <Route path="/history"     element={<ProtectedRoute><HistoryPage /></ProtectedRoute>} />
+          <Route path="/study"       element={<ProtectedRoute><StudyPage /></ProtectedRoute>} />
+          <Route path="/flashcard"   element={<ProtectedRoute><FlashcardPage /></ProtectedRoute>} />
+          <Route path="/test"        element={<ProtectedRoute><TestPage /></ProtectedRoute>} />
+          <Route path="/about"       element={<ProtectedRoute><AboutPage /></ProtectedRoute>} />
+          <Route path="/leaderboard" element={<ProtectedRoute><LeaderboardPage /></ProtectedRoute>} />
+
+          <Route path="/" element={<Navigate to="/login" replace />} />
+          <Route path="*" element={<NotFoundPage />} />
+        </Routes>
+      </ToastProvider>
+    </AuthProvider>
+  );
+}
+
 function App() {
   return (
     <ErrorBoundary>
       <ThemeProvider>
-        <AuthProvider>
-          <ToastProvider>
-            <BrowserRouter>
-              <TitleUpdater />
-              <ShortcutModal />
-              <Navbar />
-              <Routes>
-                {/* Public routes */}
-                <Route path="/login"        element={<LoginPage />} />
-                <Route path="/register"     element={<RegisterPage />} />
-                <Route path="/share/:data"  element={<SharePage />} />
-
-                {/* Protected routes */}
-                <Route path="/home"        element={<ProtectedRoute><HomePage /></ProtectedRoute>} />
-                <Route path="/dashboard"   element={<ProtectedRoute><DashboardPage /></ProtectedRoute>} />
-                <Route path="/generate"    element={<ProtectedRoute><GeneratePage /></ProtectedRoute>} />
-                <Route path="/quiz"        element={<ProtectedRoute><QuizPage /></ProtectedRoute>} />
-                <Route path="/result"      element={<ProtectedRoute><ResultPage /></ProtectedRoute>} />
-                <Route path="/history"     element={<ProtectedRoute><HistoryPage /></ProtectedRoute>} />
-                <Route path="/study"       element={<ProtectedRoute><StudyPage /></ProtectedRoute>} />
-                <Route path="/flashcard"   element={<ProtectedRoute><FlashcardPage /></ProtectedRoute>} />
-                <Route path="/test"        element={<ProtectedRoute><TestPage /></ProtectedRoute>} />
-                <Route path="/about"       element={<ProtectedRoute><AboutPage /></ProtectedRoute>} />
-                <Route path="/leaderboard" element={<ProtectedRoute><LeaderboardPage /></ProtectedRoute>} />
-
-                {/* Root → login */}
-                <Route path="/" element={<Navigate to="/login" replace />} />
-
-                {/* Custom 404 */}
-                <Route path="*" element={<NotFoundPage />} />
-              </Routes>
-            </BrowserRouter>
-          </ToastProvider>
-        </AuthProvider>
+        <BrowserRouter>
+          <AppShell />
+        </BrowserRouter>
       </ThemeProvider>
     </ErrorBoundary>
   );
