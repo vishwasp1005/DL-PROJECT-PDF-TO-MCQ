@@ -36,7 +36,7 @@ export default function GeneratePage() {
     const fileInputRef = useRef();
 
     // ── Read guest flag from context (reactive) ───────────────────────────────
-    const { isGuest } = useAuthContext();
+    const { isGuest, serverWaking } = useAuthContext();
 
     const saved = loadPdfMeta();
 
@@ -95,19 +95,21 @@ export default function GeneratePage() {
                 formData.append("file", selectedFile);
 
                 const controller = new AbortController();
-                const timeout    = setTimeout(() => controller.abort(), 15000);
+                const timeout    = setTimeout(() => controller.abort(), 60_000); // 60s — large PDFs need time
                 let res;
                 try {
                     res = await API.post("/quiz/analyze", formData, { signal: controller.signal });
                 } catch (analyzeErr) {
                     clearTimeout(timeout);
-                    // ✅ Do NOT manually handle 401 here — apiClient interceptor does it.
-                    // Just fall back gracefully so the user can still try generating.
+                    // ✅ NEVER manually handle 401 — apiClient interceptor handles it.
+                    // ✅ NEVER return early on AbortError — keep the file state so
+                    //    the user can still click Generate without re-uploading.
+                    // Just save basic metadata and fall through gracefully.
+                    console.warn("[Generate] Analyze failed (non-fatal):", analyzeErr.message);
                     const meta = { name: selectedFile.name, size: selectedFile.size };
                     savePdfMeta(meta);
                     setPdfMeta(meta);
-                    setExtracting(false);
-                    return;
+                    // DO NOT return — fall through to setExtracting(false) in finally
                 }
                 clearTimeout(timeout);
 
@@ -464,6 +466,22 @@ export default function GeneratePage() {
                                     {d === "Easy" ? "🟢" : d === "Hard" ? "🔴" : "🟡"} {d}
                                 </button>
                             ))}
+                        </div>
+                    </div>
+                )}
+
+                {serverWaking && (
+                    <div style={{
+                        background: "rgba(251,191,36,.12)", border: "1px solid rgba(251,191,36,.4)",
+                        borderRadius: "10px", padding: ".75rem 1rem", marginBottom: "1rem",
+                        fontSize: ".82rem", color: "#92400E", display: "flex", alignItems: "center", gap: ".625rem",
+                    }}>
+                        <span style={{ fontSize: "1.1rem", animation: "spin .8s linear infinite", display: "inline-block" }}>⚙</span>
+                        <div>
+                            <strong>Server is waking up…</strong>
+                            <div style={{ opacity: .8, marginTop: ".1rem" }}>
+                                Render free-tier servers sleep after inactivity. Your request will be retried automatically — no need to do anything.
+                            </div>
                         </div>
                     </div>
                 )}
