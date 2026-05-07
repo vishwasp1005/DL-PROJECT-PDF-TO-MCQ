@@ -1,16 +1,31 @@
 /**
- * GeneratePage (v3 — auth-stable)
- * =================================
- * FIXES:
- *  1. Removed ALL manual localStorage.removeItem("token") + navigate("/login") calls.
- *     The Axios interceptor in apiClient.js handles 401 automatically — pages should
- *     NEVER manually clear auth state. Doing so bypassed the refresh-token flow.
- *  2. `isGuest` now reads from AuthContext, not localStorage directly.
- *  3. No forced navigation on API errors — errors show inline instead.
+ * GeneratePage (v4 — auth-stable + crash-free)
+ * =============================================
+ *
+ * BUGS FIXED IN THIS FILE (beyond the api.js shim fix):
+ *
+ * BUG A — TypeError crash when /analyze fails: "Cannot read properties of
+ *   undefined (reading 'data')"
+ *   In handleFileSelect, `res` was declared with `let` outside the inner
+ *   try/catch. If the catch block ran (analyze threw), `res` stayed undefined.
+ *   The code then unconditionally did `const { max_questions } = res.data`
+ *   immediately after — crashing with a TypeError. This fell into the outer
+ *   catch, but by then api.js had already fired window.location.href="/login".
+ *   FIX: Added `if (res) { ... }` guard so the destructure only runs when
+ *   the analyze call actually succeeded.
+ *
+ * BUG B — handleGenerate used raw API.post instead of quizService.generateQuiz
+ *   The generate call was made directly via the legacy `API` client, bypassing
+ *   the upload-progress callback and the correct timeout (360s) that
+ *   quizService.generateQuiz sets. Now delegates to quizService for both
+ *   analyze and generate, keeping all API logic in one place.
+ *
+ * BUG C — api.js import (now fixed in api.js itself via the shim, but also
+ *   updated here to import from services/quizService for clarity).
  */
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import API from "../api";
+import { analyzePDF, generateQuiz } from "../services/quizService";
 import { useAuthContext } from "../context/AuthContext";
 
 const PDF_META_KEY = "qf_last_pdf";
@@ -35,7 +50,7 @@ export default function GeneratePage() {
     const navigate     = useNavigate();
     const fileInputRef = useRef();
 
-    // ── Read guest flag from context (reactive) ───────────────────────────────
+    // ── Read auth state from context (reactive) ───────────────────────────────
     const { isGuest, serverWaking } = useAuthContext();
 
     const saved = loadPdfMeta();
@@ -54,6 +69,7 @@ export default function GeneratePage() {
     const [selectedTopic, setSelectedTopic] = useState(saved?.selectedTopic || "");
     const [loading,       setLoading]       = useState(false);
     const [extracting,    setExtracting]    = useState(false);
+    const [uploadPct,     setUploadPct]     = useState(0);    // upload progress 0-100
     const [progress,      setProgress]      = useState(0);
     const [genPhase,      setGenPhase]      = useState(0);
     const [error,         setError]         = useState("");
@@ -75,7 +91,7 @@ export default function GeneratePage() {
     };
 
     /* ── File selection ── */
-    const handleFileSelect = async (selectedFile) => {
+    const handleFileSelect = useCallback(async (selectedFile) => {
         if (!selectedFile || selectedFile.type !== "application/pdf") {
             setError("Please upload a valid PDF file.");
             return;
@@ -89,65 +105,84 @@ export default function GeneratePage() {
         setMaxQ(50);
         setNumQuestions(10);
 
+        // Always save basic metadata first so the UI shows the filename
+        // even if the analyze call fails.
+        const baseMeta = { name: selectedFile.name, size: selectedFile.size };
+
         try {
             if (!isGuest) {
-                const formData = new FormData();
-                formData.append("file", selectedFile);
-
-                const controller = new AbortController();
-                const timeout    = setTimeout(() => controller.abort(), 60_000); // 60s — large PDFs need time
-                let res;
+                // ── FIX BUG A: use quizService.analyzePDF (uses apiClient with
+                //    correct token key). The old code used API.post from the legacy
+                //    client which never attached the Authorization header. ──────────
+                let analyzeData = null;
                 try {
-                    res = await API.post("/quiz/analyze", formData, { signal: controller.signal });
+                    analyzeData = await analyzePDF(selectedFile);
                 } catch (analyzeErr) {
-                    clearTimeout(timeout);
-                    // ✅ NEVER manually handle 401 — apiClient interceptor handles it.
-                    // ✅ NEVER return early on AbortError — keep the file state so
-                    //    the user can still click Generate without re-uploading.
-                    // Just save basic metadata and fall through gracefully.
-                    console.warn("[Generate] Analyze failed (non-fatal):", analyzeErr.message);
-                    const meta = { name: selectedFile.name, size: selectedFile.size };
-                    savePdfMeta(meta);
-                    setPdfMeta(meta);
-                    // DO NOT return — fall through to setExtracting(false) in finally
+                    // Non-fatal: analyze failing doesn't block generation.
+                    // The interceptor in apiClient.js has already handled any 401
+                    // (attempted refresh, queued the retry) — we do NOT redirect here.
+                    // Log it and fall through; the user can still click Generate.
+                    console.warn("[Generate] Analyze failed (non-fatal):", analyzeErr.userMessage || analyzeErr.message);
                 }
-                clearTimeout(timeout);
 
-                const { max_questions, detected_difficulty, word_count, char_count, topics: topicList } = res.data;
-                setMaxQ(max_questions);
-                setNumQuestions(Math.min(10, max_questions));
-                setDetectedDiff(detected_difficulty);
-                setDifficulty(detected_difficulty);
-                setWordCount(word_count);
-                setCharCount(char_count);
-                setTopics(topicList || []);
-                setSelectedTopic("");
+                if (analyzeData) {
+                    // ── FIX BUG A: `analyzeData` is only destructured when the
+                    //    call succeeded. Old code unconditionally did `res.data`
+                    //    after the catch, crashing with TypeError. ────────────────
+                    const {
+                        max_questions,
+                        detected_difficulty,
+                        word_count,
+                        char_count,
+                        topics: topicList,
+                    } = analyzeData;
 
-                const meta = {
-                    name: selectedFile.name, size: selectedFile.size,
-                    maxQ: max_questions, numQuestions: Math.min(10, max_questions),
-                    wordCount: word_count, charCount: char_count,
-                    detectedDiff: detected_difficulty, difficulty: detected_difficulty,
-                    topics: topicList || [], qTypes: ["MCQ"], selectedTopic: "", detailedExp: true,
-                };
-                savePdfMeta(meta);
-                setPdfMeta(meta);
+                    setMaxQ(max_questions);
+                    setNumQuestions(Math.min(10, max_questions));
+                    setDetectedDiff(detected_difficulty);
+                    setDifficulty(detected_difficulty);
+                    setWordCount(word_count);
+                    setCharCount(char_count);
+                    setTopics(topicList || []);
+                    setSelectedTopic("");
+
+                    const richMeta = {
+                        name: selectedFile.name,
+                        size: selectedFile.size,
+                        maxQ: max_questions,
+                        numQuestions: Math.min(10, max_questions),
+                        wordCount: word_count,
+                        charCount: char_count,
+                        detectedDiff: detected_difficulty,
+                        difficulty: detected_difficulty,
+                        topics: topicList || [],
+                        qTypes: ["MCQ"],
+                        selectedTopic: "",
+                        detailedExp: true,
+                    };
+                    savePdfMeta(richMeta);
+                    setPdfMeta(richMeta);
+                } else {
+                    // Analyze failed — save basic metadata so the UI still shows the file
+                    savePdfMeta(baseMeta);
+                    setPdfMeta(baseMeta);
+                }
             } else {
-                const meta = { name: selectedFile.name, size: selectedFile.size };
-                savePdfMeta(meta);
-                setPdfMeta(meta);
+                savePdfMeta(baseMeta);
+                setPdfMeta(baseMeta);
             }
         } catch (e) {
-            // ✅ Never manually clear auth or navigate to login on catch.
-            // The interceptor already handles 401 globally.
-            console.warn("Analyze failed:", e.message);
-            const meta = { name: selectedFile.name, size: selectedFile.size };
-            savePdfMeta(meta);
-            setPdfMeta(meta);
+            // Outer safety net — should never fire (inner catch above handles
+            // everything), but guards against unexpected throws.
+            // NEVER manually clear auth state or navigate to login here.
+            // apiClient.js interceptor handles all auth failures globally.
+            console.warn("Unexpected error in handleFileSelect:", e.message);
+            savePdfMeta(baseMeta);
+            setPdfMeta(baseMeta);
         } finally {
             setExtracting(false);
         }
-    };
+    }, [isGuest]);
 
     const handleClearPdf = () => {
         setFile(null); setPdfMeta(null);
@@ -166,7 +201,7 @@ export default function GeneratePage() {
     const handleGenerate = async () => {
         if (!file)    { setError("Please select a PDF file first."); return; }
         if (isGuest)  { setError("Guest mode: please sign up to use AI generation."); return; }
-        setError(""); setLoading(true); setProgress(5); setGenPhase(1);
+        setError(""); setLoading(true); setProgress(5); setGenPhase(1); setUploadPct(0);
 
         let tick;
         const runPhase = (from, to, phase, durationMs) => {
@@ -186,24 +221,26 @@ export default function GeneratePage() {
         setTimeout(() => runPhase(35, 88, 3, 35000), 1600);
 
         try {
-            const formData = new FormData();
-            formData.append("file",          file);
-            formData.append("num_questions", numQuestions);
-            formData.append("q_type",        qTypes.join(","));
-            formData.append("difficulty",    difficulty);
-
-            const topicParam = selectedTopic ? `&topic=${encodeURIComponent(selectedTopic)}` : "";
-            const res = await API.post(
-                `/quiz/generate?num_questions=${numQuestions}&q_type=${qTypes.join(",")}&difficulty=${difficulty}${topicParam}`,
-                formData
-            );
+            // ── FIX BUG B: Use quizService.generateQuiz (uses apiClient with
+            //    correct token key + 360s timeout + upload progress callback).
+            //    Old code used the legacy API.post directly. ──────────────────
+            const data = await generateQuiz({
+                file,
+                numQuestions,
+                qType:      qTypes.join(","),
+                difficulty,
+                topic:      selectedTopic || undefined,
+                onUploadProgress: ({ loaded, total }) => {
+                    if (total) setUploadPct(Math.round((loaded / total) * 100));
+                },
+            });
 
             setProgress(100);
             setGenPhase(4);
             clearInterval(tick);
 
-            const questions    = res.data.questions || [];
-            const quizSessionId = res.data.quiz_session_id;
+            const questions     = data.questions || [];
+            const quizSessionId = data.quiz_session_id;
             localStorage.setItem("qg_questions",  JSON.stringify(questions));
             localStorage.setItem("qg_session_id", String(quizSessionId));
             localStorage.setItem("qg_pdf_name",   file.name);
@@ -213,26 +250,45 @@ export default function GeneratePage() {
         } catch (e) {
             clearInterval(tick);
             const status = e.response?.status;
-            // ✅ Do NOT manually handle 401 — interceptor already redirected.
-            // Only show inline errors for non-auth failures.
-            if (status === 401) return; // interceptor already handled this
-            const detail = e.response?.data?.detail;
+
+            // ✅ NEVER manually handle 401 — apiClient interceptor already
+            // attempted a refresh and will redirect ONLY if refresh truly failed.
+            // If we returned early here on 401, we'd skip the finally cleanup.
+            if (status === 401) {
+                // Interceptor already handled or is handling this.
+                // Just clean up loading state and bail silently.
+                return;
+            }
+
+            // Surface the most useful error message to the user.
+            const userMsg   = e.userMessage; // set by apiClient interceptor
+            const detail    = e.response?.data?.detail;
+
             setError(
+                userMsg ? userMsg :
                 detail && detail !== "Invalid token" ? detail :
                 status === 422 ? "Invalid request — check your file or settings." :
-                status === 413 ? "PDF too large. Try a smaller file (max 20 MB)." :
+                status === 413 ? "PDF too large. Try a smaller file (max 25 MB)." :
                 status === 429 ? "AI rate limit reached. Please wait 30 seconds and retry." :
                 status === 503 ? "AI service temporarily unavailable. Please retry in a moment." :
+                status === 504 ? "Generation timed out. Try fewer questions or a smaller PDF." :
                 "Generation failed. Try fewer questions or re-upload the PDF."
             );
         } finally {
+            setUploadPct(0);
             setTimeout(() => { setLoading(false); setProgress(0); setGenPhase(0); }, 600);
         }
     };
 
     const goTo = (path) => {
         if (!generated) return;
-        navigate(path, { state: { questions: generated.questions, quizSessionId: generated.quizSessionId, pdfName: generated.pdfName } });
+        navigate(path, {
+            state: {
+                questions:      generated.questions,
+                quizSessionId:  generated.quizSessionId,
+                pdfName:        generated.pdfName,
+            },
+        });
     };
 
     const GEN_STEPS = [
@@ -277,7 +333,7 @@ export default function GeneratePage() {
                             Upload your PDF
                         </div>
                         <p style={{ fontSize: ".85rem", color: "var(--text-muted)", maxWidth: "320px", margin: "0 auto .875rem", lineHeight: 1.65 }}>
-                            Drag and drop your study material here, or click to browse files. Supports PDF documents up to 20MB.
+                            Drag and drop your study material here, or click to browse files. Supports PDF documents up to 25MB.
                         </p>
                         <button className="btn btn-primary" style={{ margin: "0 auto", pointerEvents: "none" }}>
                             📎 Select Document
@@ -497,6 +553,19 @@ export default function GeneratePage() {
 
                 {loading && (
                     <div className="gen-progress-wrap">
+                        {/* Upload progress bar — shown during file transfer */}
+                        {uploadPct > 0 && uploadPct < 100 && (
+                            <div style={{ marginBottom: ".75rem" }}>
+                                <div style={{ display: "flex", justifyContent: "space-between", fontSize: ".7rem", fontWeight: 600, color: "var(--text-muted)", marginBottom: ".35rem" }}>
+                                    <span>⬆ Uploading PDF…</span>
+                                    <span>{uploadPct}%</span>
+                                </div>
+                                <div style={{ height: "4px", background: "var(--border)", borderRadius: "2px" }}>
+                                    <div style={{ height: "100%", width: `${uploadPct}%`, background: "var(--accent)", borderRadius: "2px", transition: "width .2s" }} />
+                                </div>
+                            </div>
+                        )}
+
                         <div className="gen-progress-header">
                             <div className="gen-progress-title">
                                 <span style={{ animation: "spin .8s linear infinite", display: "inline-block", fontSize: "1rem" }}>⚙</span>
