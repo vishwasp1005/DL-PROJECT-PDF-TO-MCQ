@@ -1,57 +1,66 @@
+/**
+ * GeneratePage (v3 — auth-stable)
+ * =================================
+ * FIXES:
+ *  1. Removed ALL manual localStorage.removeItem("token") + navigate("/login") calls.
+ *     The Axios interceptor in apiClient.js handles 401 automatically — pages should
+ *     NEVER manually clear auth state. Doing so bypassed the refresh-token flow.
+ *  2. `isGuest` now reads from AuthContext, not localStorage directly.
+ *  3. No forced navigation on API errors — errors show inline instead.
+ */
 import React, { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import API from "../api";
+import { useAuthContext } from "../context/AuthContext";
 
-const PDF_META_KEY = "qf_last_pdf"; // localStorage key for persisted PDF metadata
+const PDF_META_KEY = "qf_last_pdf";
 
 const Q_TYPES = [
     { id: "MCQ", label: "Multiple Choice", desc: "Generate 4-option questions" },
-    { id: "TF", label: "True / False", desc: "Fact-based statements" },
-    { id: "FIB", label: "Fill in Blank", desc: "Complete the sentence" },
+    { id: "TF",  label: "True / False",    desc: "Fact-based statements" },
+    { id: "FIB", label: "Fill in Blank",   desc: "Complete the sentence" },
 ];
 
-/** Save PDF metadata to localStorage (we can't save File object) */
 function savePdfMeta(meta) {
     try { localStorage.setItem(PDF_META_KEY, JSON.stringify(meta)); } catch { }
 }
-/** Load PDF metadata from localStorage */
 function loadPdfMeta() {
     try { return JSON.parse(localStorage.getItem(PDF_META_KEY) || "null"); } catch { return null; }
 }
-/** Clear persistent PDF state (called on logout or "Change") */
 export function clearPdfMeta() {
     localStorage.removeItem(PDF_META_KEY);
 }
 
 export default function GeneratePage() {
-    const navigate    = useNavigate();
-    const fileInputRef= useRef();
+    const navigate     = useNavigate();
+    const fileInputRef = useRef();
 
-    // ── Restore from localStorage on first mount ──────────────────────────────
+    // ── Read guest flag from context (reactive) ───────────────────────────────
+    const { isGuest } = useAuthContext();
+
     const saved = loadPdfMeta();
 
-    const [file, setFile] = useState(null);  // actual File object (not persisted)
-    const [pdfMeta, setPdfMeta] = useState(saved); // persisted metadata (name, size, etc.)
-    const [dragging, setDragging] = useState(false);
-    const [numQuestions, setNumQuestions] = useState(saved?.numQuestions || 10);
-    const [maxQ, setMaxQ] = useState(saved?.maxQ || 50);
-    const [wordCount, setWordCount] = useState(saved?.wordCount || null);
-    const [charCount, setCharCount] = useState(saved?.charCount || null);
-    const [qTypes, setQTypes] = useState(saved?.qTypes || ["MCQ"]);
-    const [difficulty, setDifficulty] = useState(saved?.difficulty || "Medium");
-    const [detectedDiff, setDetectedDiff] = useState(saved?.detectedDiff || null);
-    const [topics, setTopics] = useState(saved?.topics || []);
+    const [file,          setFile]          = useState(null);
+    const [pdfMeta,       setPdfMeta]       = useState(saved);
+    const [dragging,      setDragging]      = useState(false);
+    const [numQuestions,  setNumQuestions]  = useState(saved?.numQuestions || 10);
+    const [maxQ,          setMaxQ]          = useState(saved?.maxQ || 50);
+    const [wordCount,     setWordCount]     = useState(saved?.wordCount || null);
+    const [charCount,     setCharCount]     = useState(saved?.charCount || null);
+    const [qTypes,        setQTypes]        = useState(saved?.qTypes || ["MCQ"]);
+    const [difficulty,    setDifficulty]    = useState(saved?.difficulty || "Medium");
+    const [detectedDiff,  setDetectedDiff]  = useState(saved?.detectedDiff || null);
+    const [topics,        setTopics]        = useState(saved?.topics || []);
     const [selectedTopic, setSelectedTopic] = useState(saved?.selectedTopic || "");
-    const [loading, setLoading] = useState(false);
-    const [extracting, setExtracting] = useState(false);
-    const [progress, setProgress] = useState(0);
-    const [genPhase, setGenPhase] = useState(0); // 0=idle 1=parse 2=chunk 3=generate 4=save
-    const [error, setError] = useState("");
-    const [generated, setGenerated] = useState(null);
-    const [detailedExp, setDetailedExp] = useState(saved?.detailedExp ?? true);
-    const [toast, setToast] = useState("");
+    const [loading,       setLoading]       = useState(false);
+    const [extracting,    setExtracting]    = useState(false);
+    const [progress,      setProgress]      = useState(0);
+    const [genPhase,      setGenPhase]      = useState(0);
+    const [error,         setError]         = useState("");
+    const [generated,     setGenerated]     = useState(null);
+    const [detailedExp,   setDetailedExp]   = useState(saved?.detailedExp ?? true);
+    const [toast,         setToast]         = useState("");
 
-    // Persist config changes to localStorage whenever they change
     useEffect(() => {
         if (!pdfMeta) return;
         savePdfMeta({ ...pdfMeta, numQuestions, qTypes, difficulty, detectedDiff, detailedExp, selectedTopic });
@@ -60,12 +69,10 @@ export default function GeneratePage() {
     const toggleType = (id) => {
         setQTypes(prev =>
             prev.includes(id)
-                ? prev.length > 1 ? prev.filter(t => t !== id) : prev  // keep at least 1
+                ? prev.length > 1 ? prev.filter(t => t !== id) : prev
                 : [...prev, id]
         );
     };
-
-    const isGuest = localStorage.getItem("isGuest") === "true";
 
     /* ── File selection ── */
     const handleFileSelect = async (selectedFile) => {
@@ -87,22 +94,18 @@ export default function GeneratePage() {
                 const formData = new FormData();
                 formData.append("file", selectedFile);
 
-                // ── 15-second timeout so "Analysing…" never gets stuck ──────
                 const controller = new AbortController();
-                const timeout = setTimeout(() => controller.abort(), 15000);
+                const timeout    = setTimeout(() => controller.abort(), 15000);
                 let res;
                 try {
                     res = await API.post("/quiz/analyze", formData, { signal: controller.signal });
                 } catch (analyzeErr) {
                     clearTimeout(timeout);
-                    if (analyzeErr.response?.status === 401) {
-                        localStorage.removeItem("token"); localStorage.removeItem("username"); localStorage.removeItem("isGuest");
-                        navigate("/login", { state: { message: "Your session expired. Please log in again." } });
-                        return;
-                    }
-                    // Timeout / network error — save basic meta and let user generate anyway
+                    // ✅ Do NOT manually handle 401 here — apiClient interceptor does it.
+                    // Just fall back gracefully so the user can still try generating.
                     const meta = { name: selectedFile.name, size: selectedFile.size };
-                    savePdfMeta(meta); setPdfMeta(meta);
+                    savePdfMeta(meta);
+                    setPdfMeta(meta);
                     setExtracting(false);
                     return;
                 }
@@ -118,39 +121,24 @@ export default function GeneratePage() {
                 setTopics(topicList || []);
                 setSelectedTopic("");
 
-                // ── Persist metadata to localStorage ───────────────────────────
                 const meta = {
-                    name: selectedFile.name,
-                    size: selectedFile.size,
-                    maxQ: max_questions,
-                    numQuestions: Math.min(10, max_questions),
-                    wordCount: word_count,
-                    charCount: char_count,
-                    detectedDiff: detected_difficulty,
-                    difficulty: detected_difficulty,
-                    topics: topicList || [],
-                    qTypes: ["MCQ"],
-                    selectedTopic: "",
-                    detailedExp: true,
+                    name: selectedFile.name, size: selectedFile.size,
+                    maxQ: max_questions, numQuestions: Math.min(10, max_questions),
+                    wordCount: word_count, charCount: char_count,
+                    detectedDiff: detected_difficulty, difficulty: detected_difficulty,
+                    topics: topicList || [], qTypes: ["MCQ"], selectedTopic: "", detailedExp: true,
                 };
                 savePdfMeta(meta);
                 setPdfMeta(meta);
             } else {
-                // Guest: just save file name/size
                 const meta = { name: selectedFile.name, size: selectedFile.size };
                 savePdfMeta(meta);
                 setPdfMeta(meta);
             }
         } catch (e) {
-            if (e.response?.status === 401) {
-                localStorage.removeItem("token");
-                localStorage.removeItem("username");
-                localStorage.removeItem("isGuest");
-                navigate("/login", { state: { message: "Your session expired. Please log in again." } });
-                return;
-            }
+            // ✅ Never manually clear auth or navigate to login on catch.
+            // The interceptor already handles 401 globally.
             console.warn("Analyze failed:", e.message);
-            // Still persist basic metadata even when analyze fails
             const meta = { name: selectedFile.name, size: selectedFile.size };
             savePdfMeta(meta);
             setPdfMeta(meta);
@@ -159,21 +147,12 @@ export default function GeneratePage() {
         }
     };
 
-    /* ── Clear PDF (Change button) ── */
     const handleClearPdf = () => {
-        setFile(null);
-        setPdfMeta(null);
+        setFile(null); setPdfMeta(null);
         localStorage.removeItem(PDF_META_KEY);
-        setGenerated(null);
-        setWordCount(null);
-        setCharCount(null);
-        setMaxQ(50);
-        setNumQuestions(10);
-        setTopics([]);
-        setSelectedTopic("");
-        setDetectedDiff(null);
-        setDifficulty("Medium");
-        setError("");
+        setGenerated(null); setWordCount(null); setCharCount(null);
+        setMaxQ(50); setNumQuestions(10); setTopics([]); setSelectedTopic("");
+        setDetectedDiff(null); setDifficulty("Medium"); setError("");
     };
 
     const handleDrop = (e) => {
@@ -183,21 +162,16 @@ export default function GeneratePage() {
 
     /* ── Generate ── */
     const handleGenerate = async () => {
-        if (!file) { setError("Please select a PDF file first."); return; }
-        if (isGuest) { setError("Guest mode: please sign up to use AI generation."); return; }
+        if (!file)    { setError("Please select a PDF file first."); return; }
+        if (isGuest)  { setError("Guest mode: please sign up to use AI generation."); return; }
         setError(""); setLoading(true); setProgress(5); setGenPhase(1);
 
-        // Phase-aware progress simulation
-        // Phase 1 (5→20): Parsing / analysing PDF
-        // Phase 2 (20→35): Chunking text
-        // Phase 3 (35→88): AI generating (long, slow)
-        // Phase 4 (88→100): Saving to DB
         let tick;
         const runPhase = (from, to, phase, durationMs) => {
             setGenPhase(phase);
-            const steps = Math.ceil((to - from) / 3);
+            const steps    = Math.ceil((to - from) / 3);
             const interval = durationMs / steps;
-            let current = from;
+            let current    = from;
             tick = setInterval(() => {
                 current = Math.min(current + 3, to);
                 setProgress(current);
@@ -205,16 +179,16 @@ export default function GeneratePage() {
             }, interval);
         };
 
-        runPhase(5, 20, 1, 800);   // Parse PDF
-        setTimeout(() => runPhase(20, 35, 2, 600), 900);  // Chunking
-        setTimeout(() => runPhase(35, 88, 3, 35000), 1600); // AI generate
+        runPhase(5, 20, 1, 800);
+        setTimeout(() => runPhase(20, 35, 2, 600),   900);
+        setTimeout(() => runPhase(35, 88, 3, 35000), 1600);
 
         try {
             const formData = new FormData();
-            formData.append("file", file);
+            formData.append("file",          file);
             formData.append("num_questions", numQuestions);
-            formData.append("q_type", qTypes.join(","));
-            formData.append("difficulty", difficulty);
+            formData.append("q_type",        qTypes.join(","));
+            formData.append("difficulty",    difficulty);
 
             const topicParam = selectedTopic ? `&topic=${encodeURIComponent(selectedTopic)}` : "";
             const res = await API.post(
@@ -226,26 +200,20 @@ export default function GeneratePage() {
             setGenPhase(4);
             clearInterval(tick);
 
-            const questions = res.data.questions || [];
+            const questions    = res.data.questions || [];
             const quizSessionId = res.data.quiz_session_id;
-            localStorage.setItem("qg_questions", JSON.stringify(questions));
+            localStorage.setItem("qg_questions",  JSON.stringify(questions));
             localStorage.setItem("qg_session_id", String(quizSessionId));
-            localStorage.setItem("qg_pdf_name", file.name);
+            localStorage.setItem("qg_pdf_name",   file.name);
             setGenerated({ questions, quizSessionId, pdfName: file.name });
-            // Show toast
             setToast(`✅ ${questions.length} questions generated! Head to Study Mode to begin.`);
             setTimeout(() => setToast(""), 5000);
         } catch (e) {
             clearInterval(tick);
             const status = e.response?.status;
-            if (status === 401) {
-                localStorage.removeItem("token");
-                localStorage.removeItem("username");
-                localStorage.removeItem("isGuest");
-                navigate("/login", { state: { message: "Session expired. Please log in again." } });
-                return;
-            }
-            // Always prefer the backend's detail message — it's specific
+            // ✅ Do NOT manually handle 401 — interceptor already redirected.
+            // Only show inline errors for non-auth failures.
+            if (status === 401) return; // interceptor already handled this
             const detail = e.response?.data?.detail;
             setError(
                 detail && detail !== "Invalid token" ? detail :
@@ -265,8 +233,6 @@ export default function GeneratePage() {
         navigate(path, { state: { questions: generated.questions, quizSessionId: generated.quizSessionId, pdfName: generated.pdfName } });
     };
 
-
-    // Generation phase labels for the step UI
     const GEN_STEPS = [
         { id: 1, label: "Parsing PDF" },
         { id: 2, label: "Chunking" },
@@ -278,7 +244,6 @@ export default function GeneratePage() {
         <div style={{ background: "var(--bg)", minHeight: "calc(100vh - 60px)", paddingBottom: "4rem" }}>
             <div className="generate-page-inner">
 
-                {/* Breadcrumb */}
                 <div className="breadcrumb" style={{ marginBottom: ".75rem" }}>
                     WORKSPACE <span>›</span> CREATION ENGINE
                 </div>
@@ -289,14 +254,10 @@ export default function GeneratePage() {
 
                 {error && <div className="alert alert-error">{error}</div>}
 
-                {/* ── UPLOAD ZONE ── three states ───────────────────────────── */}
-
-                {/* Hidden file input — always present */}
                 <input ref={fileInputRef} type="file" accept=".pdf" style={{ display: "none" }}
                     onChange={(e) => handleFileSelect(e.target.files[0])} />
 
                 {!file && !pdfMeta ? (
-                    /* State 1: Nothing uploaded yet */
                     <div
                         className={`upload-zone${dragging ? " dragging" : ""}`}
                         style={{ marginBottom: "1.5rem" }}
@@ -321,7 +282,6 @@ export default function GeneratePage() {
                         </button>
                     </div>
                 ) : (
-                    /* State 2: File active (just uploaded) OR State 3: Restored from localStorage */
                     <div className="card" style={{ marginBottom: "1.5rem" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
                             <div style={{ fontSize: "1.5rem" }}>📄</div>
@@ -349,7 +309,6 @@ export default function GeneratePage() {
                                     )}
                                     {extracting && <span style={{ fontSize: ".68rem", fontWeight: 600, color: "var(--accent)" }}>Analysing…</span>}
                                 </div>
-                                {/* Restored-state hint */}
                                 {!file && pdfMeta && (
                                     <div style={{
                                         marginTop: ".4rem", fontSize: ".7rem",
@@ -361,7 +320,6 @@ export default function GeneratePage() {
                                             onClick={() => fileInputRef.current?.click()}
                                         >Upload again</span> to generate, or Change to pick a different file.
                                     </div>
-
                                 )}
                             </div>
                             <button className="btn btn-outline btn-sm" style={{ flexShrink: 0 }}
@@ -372,7 +330,6 @@ export default function GeneratePage() {
                     </div>
                 )}
 
-                {/* ── DOCUMENT ANALYSIS ── */}
                 {file && !extracting && wordCount && (
                     <>
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: ".75rem" }}>
@@ -402,11 +359,10 @@ export default function GeneratePage() {
                             </div>
                         </div>
 
-                        {/* Topic chips */}
                         {topics.length > 0 && (
                             <div style={{ marginBottom: "1.5rem" }}>
                                 <div style={{ fontSize: ".65rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".1em", color: "var(--text-light)", marginBottom: ".5rem" }}>
-                                    📌 FOCUS TOPIC <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>(optional — narrow the LLM focus)</span>
+                                    📌 FOCUS TOPIC <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>(optional)</span>
                                 </div>
                                 <div style={{ display: "flex", flexWrap: "wrap", gap: ".4rem" }}>
                                     {["All Topics", ...topics].map(t => (
@@ -428,7 +384,6 @@ export default function GeneratePage() {
                     </>
                 )}
 
-                {/* ── QUESTION CONFIGURATION ── */}
                 {file && (
                     <div className="card" style={{ marginBottom: "1.5rem" }}>
                         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: "1.25rem" }}>
@@ -446,7 +401,6 @@ export default function GeneratePage() {
                             </div>
                         </div>
 
-                        {/* Slider */}
                         <input type="range" className="form-range" min={1} max={maxQ} value={numQuestions}
                             onChange={(e) => setNumQuestions(+e.target.value)}
                             style={{ width: "100%", marginBottom: ".5rem", accentColor: "var(--navy)" }} />
@@ -456,7 +410,6 @@ export default function GeneratePage() {
                             <span>{maxQ} QUESTIONS</span>
                         </div>
 
-                        {/* Question type — multi-select */}
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: ".875rem" }}>
                             {Q_TYPES.map(({ id, label, desc }) => (
                                 <label key={id} style={{
@@ -464,8 +417,7 @@ export default function GeneratePage() {
                                     padding: ".7rem .875rem", borderRadius: "var(--radius-sm)",
                                     border: `1.5px solid ${qTypes.includes(id) ? "var(--navy)" : "var(--border)"}`,
                                     background: qTypes.includes(id) ? "var(--navy-muted)" : "var(--card)",
-                                    cursor: "pointer", transition: "all .15s",
-                                    minHeight: "48px",
+                                    cursor: "pointer", transition: "all .15s", minHeight: "48px",
                                 }}>
                                     <input type="checkbox" checked={qTypes.includes(id)} onChange={() => toggleType(id)}
                                         style={{ accentColor: "var(--navy)", width: "15px", height: "15px", flexShrink: 0 }} />
@@ -480,8 +432,7 @@ export default function GeneratePage() {
                                 padding: ".7rem .875rem", borderRadius: "var(--radius-sm)",
                                 border: `1.5px solid ${detailedExp ? "var(--navy)" : "var(--border)"}`,
                                 background: detailedExp ? "var(--navy-muted)" : "var(--card)",
-                                cursor: "pointer", transition: "all .15s",
-                                minHeight: "48px",
+                                cursor: "pointer", transition: "all .15s", minHeight: "48px",
                             }}>
                                 <input type="checkbox" checked={detailedExp} onChange={() => setDetailedExp(p => !p)}
                                     style={{ accentColor: "var(--navy)", width: "15px", height: "15px", flexShrink: 0 }} />
@@ -494,7 +445,6 @@ export default function GeneratePage() {
                     </div>
                 )}
 
-                {/* Difficulty (if file loaded) */}
                 {file && (
                     <div className="card" style={{ marginBottom: "1.5rem" }}>
                         <div style={{ fontWeight: 700, fontSize: ".9rem", color: "var(--navy)", marginBottom: ".875rem" }}>
@@ -518,7 +468,6 @@ export default function GeneratePage() {
                     </div>
                 )}
 
-                {/* ── GENERATE BUTTON ── */}
                 {file && (
                     <button className="btn btn-primary btn-full"
                         style={{ fontSize: ".95rem", marginBottom: "1.25rem", minHeight: "52px" }}
@@ -528,7 +477,6 @@ export default function GeneratePage() {
                     </button>
                 )}
 
-                {/* Premium progress / step UI */}
                 {loading && (
                     <div className="gen-progress-wrap">
                         <div className="gen-progress-header">
@@ -542,11 +490,9 @@ export default function GeneratePage() {
                             </div>
                             <div className="gen-progress-pct">{progress}%</div>
                         </div>
-
                         <div className="gen-progress-track">
                             <div className="gen-progress-fill" style={{ width: `${progress}%` }} />
                         </div>
-
                         <div className="gen-steps">
                             {GEN_STEPS.map(step => {
                                 const state = genPhase > step.id ? "done" : genPhase === step.id ? "active" : "";
@@ -558,7 +504,6 @@ export default function GeneratePage() {
                                 );
                             })}
                         </div>
-
                         <div className="gen-eta">
                             {genPhase <= 2
                                 ? "Analysing document structure…"
@@ -569,7 +514,6 @@ export default function GeneratePage() {
                     </div>
                 )}
 
-                {/* Guest notice */}
                 {isGuest && file && (
                     <div className="alert alert-info">
                         🔒 AI generation requires an account.{" "}
@@ -578,7 +522,6 @@ export default function GeneratePage() {
                     </div>
                 )}
 
-                {/* ── TOAST NOTIFICATION ── */}
                 {toast && (
                     <div style={{
                         position: "fixed", bottom: "2rem", left: "50%", transform: "translateX(-50%)",
@@ -594,7 +537,6 @@ export default function GeneratePage() {
                     </div>
                 )}
 
-                {/* ── POST-GENERATION ACTIONS ── */}
                 {generated && (
                     <div className="card" style={{ marginTop: "1.5rem", border: "1.5px solid var(--success)" }}>
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "1rem" }}>
@@ -606,7 +548,7 @@ export default function GeneratePage() {
                         </div>
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: ".625rem" }}>
                             <button className="btn btn-primary" onClick={() => goTo("/study")}>📚 Study Mode</button>
-                            <button className="btn btn-outline" onClick={() => { setGenerated(null); setFile(null); setWordCount(null); setCharCount(null); setDetectedDiff(null); setTopics([]); }}>🔄 Regenerate MCQ</button>
+                            <button className="btn btn-outline" onClick={() => { setGenerated(null); setFile(null); setWordCount(null); setCharCount(null); setDetectedDiff(null); setTopics([]); }}>🔄 Regenerate</button>
                         </div>
                     </div>
                 )}
