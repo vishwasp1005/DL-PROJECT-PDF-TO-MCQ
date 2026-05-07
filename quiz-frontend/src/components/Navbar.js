@@ -1,6 +1,18 @@
+/**
+ * Navbar (v3 — auth-context-driven)
+ * ===================================
+ * FIXES:
+ *  1. Reads auth state from AuthContext (not localStorage directly)
+ *     → re-renders correctly on login/logout without page refresh
+ *  2. Waits for `initializing` before deciding to hide/show
+ *     → eliminates the flash-disappear on first load
+ *  3. Uses new token key "qf_access_token" consistent with authService
+ *  4. Logout calls AuthContext.logout() which revokes the refresh cookie
+ */
 import React, { useState, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { useThemeContext } from "../context/ThemeContext";
+import { useAuthContext } from "../context/AuthContext";
 
 function useIsMobile(bp = 768) {
     const [m, setM] = useState(() => window.innerWidth <= bp);
@@ -15,30 +27,31 @@ function useIsMobile(bp = 768) {
 export default function Navbar() {
     const navigate  = useNavigate();
     const location  = useLocation();
-    const token     = localStorage.getItem("token");
-    const isGuest   = localStorage.getItem("isGuest") === "true";
-    const username  = localStorage.getItem("username") || "";
     const { theme, toggleTheme } = useThemeContext();
-    const isMobile  = useIsMobile(768);
-    const [open, setOpen]   = useState(false);
 
-    // Close menu on route change
+    // ── Auth from context (not localStorage) ─────────────────────────────────
+    const { isLoggedIn, isGuest, username, logout, initializing } = useAuthContext();
+
+    const isMobile  = useIsMobile(768);
+    const [open, setOpen] = useState(false);
+
     useEffect(() => setOpen(false), [location.pathname]);
-    // Prevent body scroll when menu open
     useEffect(() => {
         document.body.style.overflow = (isMobile && open) ? "hidden" : "";
         return () => { document.body.style.overflow = ""; };
     }, [isMobile, open]);
 
+    // ── Hide on auth pages or while auth is still being checked ──────────────
     const authPages = ["/login", "/register", "/"];
-    if (!token || authPages.includes(location.pathname)) return null;
+    const hide = initializing || !isLoggedIn || authPages.includes(location.pathname);
+    if (hide) return null;
 
     const isActive = (p) => location.pathname === p;
     const isDark   = theme === "dark";
 
-    const handleLogout = () => {
-        ["token","username","isGuest","qf_last_pdf"].forEach(k => localStorage.removeItem(k));
+    const handleLogout = async () => {
         setOpen(false);
+        await logout();       // calls backend + clears all tokens
         navigate("/login");
     };
 
@@ -51,9 +64,9 @@ export default function Navbar() {
         { label: "About",     path: "/about",      icon: "ℹ️" },
     ];
 
-    const navBg  = isDark ? "#0F172A" : "#ffffff";
-    const border = isDark ? "rgba(255,255,255,.08)" : "#E5E7EB";
-    const muted  = isDark ? "#94A3B8" : "#6B7280";
+    const navBg    = isDark ? "#0F172A" : "#ffffff";
+    const border   = isDark ? "rgba(255,255,255,.08)" : "#E5E7EB";
+    const muted    = isDark ? "#94A3B8" : "#6B7280";
     const hoverBg  = isDark ? "rgba(255,255,255,.07)" : "#F9FAFB";
     const activeBg = isDark ? "#1E293B" : "#FFFFFF";
     const ACCENT   = "#4F6AF5";
@@ -176,7 +189,7 @@ export default function Navbar() {
                         >↪</button>
                     )}
 
-                    {/* Hamburger / X toggle (mobile only) */}
+                    {/* Hamburger (mobile) */}
                     {isMobile && (
                         <button
                             onClick={() => setOpen(o => !o)}
@@ -187,18 +200,14 @@ export default function Navbar() {
                                 border: `1.5px solid ${open ? ACCENT : border}`,
                                 background: open ? `${ACCENT}18` : "transparent",
                                 cursor: "pointer", flexShrink: 0, transition: "all .2s",
-                                fontSize: open ? "1.1rem" : "0",
-                                // when closed render 3 bars via box-shadow trick
                                 position: "relative",
                             }}
                         >
                             {open ? (
-                                /* ✕ icon */
                                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
                                     <path d="M2 2l12 12M14 2L2 14" stroke={ACCENT} strokeWidth="2.2" strokeLinecap="round" />
                                 </svg>
                             ) : (
-                                /* ☰ icon */
                                 <svg width="18" height="14" viewBox="0 0 18 14" fill="none">
                                     <rect y="0"  width="18" height="2" rx="1" fill={isDark ? "#94A3B8" : "#374151"} />
                                     <rect y="6"  width="13" height="2" rx="1" fill={isDark ? "#94A3B8" : "#374151"} />
@@ -214,7 +223,6 @@ export default function Navbar() {
         {/* ── Mobile dropdown panel ── */}
         {isMobile && open && (
             <>
-                {/* Backdrop */}
                 <div onClick={() => setOpen(false)} style={{
                     position: "fixed", inset: 0, zIndex: 298,
                     background: "rgba(0,0,0,.35)",
@@ -222,7 +230,6 @@ export default function Navbar() {
                     animation: "pageFade .2s ease",
                 }} />
 
-                {/* Panel */}
                 <div style={{
                     position: "fixed", top: "60px", left: 0, right: 0, zIndex: 299,
                     background: navBg,
@@ -232,7 +239,7 @@ export default function Navbar() {
                     animation: "menuSlide .25s cubic-bezier(.22,.61,.36,1)",
                     transformOrigin: "top center",
                 }}>
-                    {/* Panel header row */}
+                    {/* Panel header */}
                     <div style={{
                         display: "flex", alignItems: "center", justifyContent: "space-between",
                         padding: "1rem 1.25rem",
@@ -280,7 +287,6 @@ export default function Navbar() {
                                 onMouseEnter={e => { if (!isActive(path)) e.currentTarget.style.background = hoverBg; }}
                                 onMouseLeave={e => { if (!isActive(path)) e.currentTarget.style.background = "transparent"; }}
                             >
-                                {/* Active left bar */}
                                 {isActive(path) && (
                                     <div style={{
                                         position: "absolute", left: 0, top: "20%", bottom: "20%",
@@ -295,7 +301,6 @@ export default function Navbar() {
                                     color: isActive(path) ? (isDark ? "#F1F5F9" : "#1B2B4B") : muted,
                                     letterSpacing: "-.01em",
                                 }}>{label}</span>
-                                {/* Active underline dot */}
                                 {isActive(path) && (
                                     <div style={{
                                         marginLeft: "auto",
@@ -314,7 +319,6 @@ export default function Navbar() {
                         marginTop: ".5rem",
                         display: "flex", flexDirection: "column", gap: ".625rem",
                     }}>
-                        {/* User info */}
                         <div style={{ display: "flex", alignItems: "center", gap: ".625rem", padding: ".5rem 0" }}>
                             <div style={{
                                 width: "32px", height: "32px", borderRadius: "50%", flexShrink: 0,
@@ -332,11 +336,9 @@ export default function Navbar() {
                             </div>
                         </div>
 
-                        {/* Sign out button */}
                         <button onClick={handleLogout} style={{
                             width: "100%", padding: ".75rem 1rem",
-                            borderRadius: "12px",
-                            border: "none", cursor: "pointer",
+                            borderRadius: "12px", border: "none", cursor: "pointer",
                             background: "linear-gradient(135deg,#EF4444,#DC2626)",
                             color: "#fff", fontWeight: 700, fontSize: ".88rem",
                             letterSpacing: ".01em",
@@ -352,7 +354,6 @@ export default function Navbar() {
                     </div>
                 </div>
 
-                {/* Slide in animation */}
                 <style>{`
                     @keyframes menuSlide {
                         from { opacity: 0; transform: translateY(-12px) scaleY(.96); }
