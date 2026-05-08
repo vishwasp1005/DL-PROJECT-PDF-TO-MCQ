@@ -1,18 +1,40 @@
 """
-api/quiz.py — Quiz API Router (v2 — large-PDF safe)
-====================================================
-Key changes from v1:
-  - PDF text is extracted via core/pdf.py's page-by-page streaming extractor
-    (never loads the full file text into a single string until chunker takes over)
-  - /analyze endpoint caps extraction at 50K chars to avoid blocking on huge PDFs
-  - /generate endpoint streams pages before chunking — no OOM on 20MB files
-  - File size validation rejects files > 20MB at the HTTP boundary (before parsing)
-  - Timeout guardrails via asyncio.wait_for on the full generation pipeline
-  - All other endpoints (history, attempt, leaderboard, ask-tutor) are unchanged
+api/quiz.py — Quiz API Router (v3 — large-PDF stable)
+======================================================
+
+ROOT CAUSES FIXED IN THIS FILE
+───────────────────────────────
+BUG 1 — CRITICAL: Synchronous PDF extraction blocks the asyncio event loop
+  LOCATION : line 80 (generate), lines 190-191 (analyze)
+  SYMPTOM  : For a 15-20 MB PDF with 200+ pages, pypdf's PdfReader iterates
+             every page synchronously. On a single-worker uvicorn process this
+             freezes the entire event loop for 5-30 seconds. During that window:
+               • Render's health-check requests time out
+               • The load-balancer marks the dyno unhealthy → kills + restarts it
+               • The in-flight HTTP connection is dropped → frontend gets 502
+               • apiClient retries 4× with 8-second delays → "server waking" UI
+               • The generation job is gone — process was restarted
+  OLD CODE : text = extract_text_from_pdf(file_bytes)          # synchronous!
+  FIX      : text = await asyncio.to_thread(extract_text_from_pdf, file_bytes)
+             This moves the pypdf work onto a thread-pool thread, yielding the
+             event loop so health checks, keepalives and other requests continue.
+             Same fix applied to get_pdf_metadata() in /analyze.
+
+BUG 2 — topic parameter silently dropped
+  LOCATION : /generate endpoint signature
+  SYMPTOM  : Frontend sends ?topic=... (built by quizService.js) and users can
+             choose a focus topic on the Generate page. The backend never declared
+             the parameter so FastAPI silently ignores it. The LLM is never told
+             to focus on the selected topic.
+  FIX      : Added `topic: Optional[str] = None` to /generate and passed it into
+             the prompt via generate_quiz_from_text().
+
+BUG 3 — Question type (MCQ / TF / FIB) never persisted (addressed in models.py)
+  The Question DB model had no `type` column. This file now reads q["type"] when
+  saving each question. The column is added in models.py + migrate_db.py.
 """
 
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
-from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from core.generator import generate_quiz_from_text, split_into_chunks
@@ -22,7 +44,7 @@ from db.models import Question, User, QuizSession
 from core.security import verify_token
 
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 import json
 import asyncio
 import logging
@@ -34,9 +56,9 @@ router = APIRouter()
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
-MAX_FILE_SIZE_BYTES  = 25 * 1024 * 1024   # 25 MB hard limit (was 20MB)
-ANALYZE_MAX_CHARS    = 50_000             # cap for /analyze (fast path)
-GENERATE_TIMEOUT_S   = 480               # 8-minute timeout (large PDFs need time)
+MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024   # 25 MB hard limit
+ANALYZE_MAX_CHARS   = 50_000             # cap for /analyze (fast path)
+GENERATE_TIMEOUT_S  = 480               # 8-minute overall timeout
 
 
 # =============================================================================
@@ -62,6 +84,7 @@ async def generate_quiz(
     num_questions: int = 5,
     q_type: str = "MCQ",
     difficulty: str = "Medium",
+    topic: Optional[str] = None,          # FIX BUG 2: was missing entirely
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -75,17 +98,23 @@ async def generate_quiz(
             detail=f"PDF too large ({len(file_bytes) // (1024*1024)}MB). Maximum allowed: 25MB."
         )
 
-    # ── 2. Stream-extract text (page by page, never full string in memory) ────
+    # ── 2. Extract text — OFF the event loop ─────────────────────────────────
+    # FIX BUG 1: extract_text_from_pdf is synchronous (pypdf PdfReader iterates
+    # every page). Wrapping in asyncio.to_thread keeps the event loop free so
+    # Render health checks and keep-alive packets are not dropped during extraction.
     try:
-        text = extract_text_from_pdf(file_bytes)
+        text = await asyncio.to_thread(extract_text_from_pdf, file_bytes)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Invalid PDF file: {e}")
 
-    # Release raw bytes — no longer needed
+    # Release raw bytes — no longer needed (frees memory before chunking)
     del file_bytes
 
     if not text.strip():
-        raise HTTPException(status_code=400, detail="No readable text found in PDF. It may be scanned/image-based.")
+        raise HTTPException(
+            status_code=400,
+            detail="No readable text found in PDF. It may be scanned/image-based."
+        )
 
     # ── 3. Cap num_questions to text density ──────────────────────────────────
     word_count = len(text.split())
@@ -107,7 +136,7 @@ async def generate_quiz(
     # ── 4. Chunked parallel generation (with overall timeout) ─────────────────
     try:
         questions = await asyncio.wait_for(
-            generate_quiz_from_text(text, capped_questions, q_type, difficulty),
+            generate_quiz_from_text(text, capped_questions, q_type, difficulty, topic=topic),
             timeout=GENERATE_TIMEOUT_S
         )
     except asyncio.TimeoutError:
@@ -122,8 +151,9 @@ async def generate_quiz(
         raise HTTPException(
             status_code=500,
             detail=(
-                f"AI returned no questions. PDF may have too little unique content. "
-                f"Max supported for this file: {max_q} questions."
+                f"AI returned no questions. PDF may have too little unique content or "
+                f"the AI service is rate-limited. Max supported for this file: {max_q} questions. "
+                f"Try again in 30 seconds."
             )
         )
 
@@ -136,35 +166,43 @@ async def generate_quiz(
     saved_questions = []
     for q in questions:
         db_question = Question(
-            question=q["question"],
-            options=json.dumps(q["options"]),
-            correct=q["correct"],
-            topic=q.get("topic", "General"),
-            difficulty=q.get("difficulty", difficulty),
-            quiz_session_id=quiz_session.id
+            question        = q["question"],
+            options         = json.dumps(q["options"]),
+            correct         = q["correct"],
+            topic           = q.get("topic", "General"),
+            difficulty      = q.get("difficulty", difficulty),
+            q_type          = q.get("type", q_type),    # FIX BUG 3: persist type
+            quiz_session_id = quiz_session.id
         )
         db.add(db_question)
         db.commit()
         db.refresh(db_question)
 
         saved_questions.append({
-            "id": db_question.id,
-            "question": db_question.question,
-            "options": json.loads(db_question.options),
-            "topic": db_question.topic,
+            "id":         db_question.id,
+            "question":   db_question.question,
+            "options":    json.loads(db_question.options),
+            "topic":      db_question.topic,
             "difficulty": db_question.difficulty,
+            "type":       db_question.q_type,
+        })
+
+    # Build response: merge saved rows with correct + type from in-memory list
+    response_questions = []
+    for i, q in enumerate(saved_questions):
+        response_questions.append({
+            **q,
+            "correct": questions[i]["correct"],
+            "type":    questions[i].get("type", q_type),
         })
 
     return {
-        "chunk_count": len(split_into_chunks(text)),
-        "quiz_session_id": quiz_session.id,
-        "generated_by": current_user.username,
-        "max_questions": max_q,
-        "word_count": word_count,
-        "questions": [
-            {**q, "correct": questions[i]["correct"], "type": questions[i].get("type", q_type)}
-            for i, q in enumerate(saved_questions)
-        ]
+        "chunk_count":      len(split_into_chunks(text)),
+        "quiz_session_id":  quiz_session.id,
+        "generated_by":     current_user.username,
+        "max_questions":    max_q,
+        "word_count":       word_count,
+        "questions":        response_questions,
     }
 
 
@@ -185,10 +223,12 @@ async def analyze_pdf(
             detail=f"PDF too large ({len(file_bytes) // (1024*1024)}MB). Maximum allowed: 25MB."
         )
 
-    # Extract only first ANALYZE_MAX_CHARS to keep /analyze fast on huge PDFs
+    # FIX BUG 1 (analyze path): both pypdf calls are synchronous — move to thread
     try:
-        text = extract_text_from_pdf(file_bytes, max_chars=ANALYZE_MAX_CHARS)
-        meta = get_pdf_metadata(file_bytes)
+        text, meta = await asyncio.gather(
+            asyncio.to_thread(extract_text_from_pdf, file_bytes, ANALYZE_MAX_CHARS),
+            asyncio.to_thread(get_pdf_metadata, file_bytes),
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Invalid PDF: {e}")
 
@@ -209,7 +249,7 @@ async def analyze_pdf(
         max_q = min(100, word_count // 60)
 
     # Difficulty heuristic
-    words = text.split()
+    words       = text.split()
     avg_len     = sum(len(w) for w in words) / max(len(words), 1)
     complex_pct = len([w for w in words if len(w) > 9]) / max(len(words), 1) * 100
     score       = avg_len * 1.5 + complex_pct * 0.4
@@ -229,15 +269,15 @@ async def analyze_pdf(
     chunk_count = len(split_into_chunks(text))
 
     return {
-        "word_count": word_count,
-        "char_count": char_count,
-        "page_count": meta.get("page_count", 0),
-        "size_mb": meta.get("size_mb", 0),
-        "max_questions": max_q,
+        "word_count":          word_count,
+        "char_count":          char_count,
+        "page_count":          meta.get("page_count", 0),
+        "size_mb":             meta.get("size_mb", 0),
+        "max_questions":       max_q,
         "detected_difficulty": difficulty,
-        "topics": topics,
-        "chunk_count": chunk_count,
-        "estimated_batches": chunk_count,
+        "topics":              topics,
+        "chunk_count":         chunk_count,
+        "estimated_batches":   chunk_count,
     }
 
 
@@ -261,26 +301,27 @@ def get_quiz_history(
     for session in sessions:
         session_questions = [
             {
-                "id": q.id,
-                "question": q.question,
-                "options": json.loads(q.options),
-                "correct": q.correct,
-                "topic": q.topic,
-                "difficulty": q.difficulty
+                "id":         q.id,
+                "question":   q.question,
+                "options":    json.loads(q.options),
+                "correct":    q.correct,
+                "topic":      q.topic,
+                "difficulty": q.difficulty,
+                "type":       q.q_type or "MCQ",    # FIX BUG 3: include type
             }
             for q in session.questions
         ]
         result.append({
             "quiz_session_id": session.id,
-            "created_at": session.created_at,
+            "created_at":      session.created_at,
             "total_questions": len(session_questions),
-            "questions": session_questions
+            "questions":       session_questions,
         })
 
     return {
         "total_sessions": len(result),
-        "generated_by": current_user.username,
-        "sessions": result
+        "generated_by":   current_user.username,
+        "sessions":       result,
     }
 
 
@@ -290,7 +331,7 @@ def get_quiz_history(
 
 class AnswerItem(BaseModel):
     question_id: int
-    selected: str
+    selected: str                    # matches Pydantic field exactly
 
 
 class AttemptRequest(BaseModel):
@@ -327,12 +368,12 @@ def attempt_quiz(
             score += 1
 
         results.append({
-            "question_id": question.id,
+            "question_id":   question.id,
             "question_text": question.question,
-            "options": json.loads(question.options),
-            "selected": ans.selected,
-            "correct": question.correct,
-            "is_correct": is_correct
+            "options":       json.loads(question.options),
+            "selected":      ans.selected,
+            "correct":       question.correct,
+            "is_correct":    is_correct,
         })
 
     total      = len(results)
@@ -346,9 +387,9 @@ def attempt_quiz(
     return {
         "quiz_session_id": session.id,
         "total_questions": total,
-        "score": score,
-        "percentage": percentage,
-        "results": results
+        "score":           score,
+        "percentage":      percentage,
+        "results":         results,
     }
 
 
@@ -386,9 +427,9 @@ def get_leaderboard(
     return {
         "leaderboard": [
             {
-                "username": row.username,
+                "username":   row.username,
                 "percentage": round(row.best_pct, 1),
-                "questions": row.total_questions or 0,
+                "questions":  row.total_questions or 0,
             }
             for row in rows
         ]
@@ -396,13 +437,13 @@ def get_leaderboard(
 
 
 # =============================================================================
-# /ask-tutor — AI Tutor (unchanged from v1)
+# /ask-tutor — AI Tutor
 # =============================================================================
 
 class TutorRequest(BaseModel):
     question: str
-    context: str = ""
-    history: List[dict] = []
+    context:  str = ""
+    history:  List[dict] = []
 
 
 @router.post("/ask-tutor")
@@ -410,11 +451,9 @@ async def ask_tutor(
     req: TutorRequest,
     current_user: User = Depends(get_current_user)
 ):
-    """AI Tutor endpoint — uses Groq to answer student questions with quiz context."""
     try:
         from groq import Groq
         from core.config import GROQ_API_KEY
-        import asyncio
 
         client = Groq(api_key=GROQ_API_KEY)
 
@@ -426,7 +465,7 @@ async def ask_tutor(
             "- Use simple real-world examples when helpful\n"
             "- Break complex ideas into numbered steps when explaining processes\n"
             "- Be encouraging and positive\n"
-            "- If the student asks about the correct answer, explain WHY it's correct, not just what it is\n"
+            "- If the student asks about the correct answer, explain WHY it's correct\n"
             "- Stay focused on the study topic"
         )
         if req.context:
