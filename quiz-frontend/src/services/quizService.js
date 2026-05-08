@@ -1,10 +1,35 @@
 /**
- * quizService — all /quiz/* API calls.
+ * quizService.js — all /quiz/* API calls (v3)
+ * ============================================
  *
- * v2 changes (large-PDF support):
- *   - generateQuiz accepts an onUploadProgress callback for real-time upload %
- *   - Explicit per-call timeout overrides (analyze=30s, generate=360s)
- *   - userMessage from apiClient interceptor is surfaced to callers
+ * BUG FIXED: `selected_option` vs `selected` field name mismatch
+ * ──────────────────────────────────────────────────────────────────────────
+ * LOCATION  : submitAttempt(), the answers payload construction
+ *
+ * OLD CODE  :
+ *   answersPayload = questions.map((q) => ({
+ *     question_id: q.id,
+ *     selected_option: answers[q.id] || "",   ← WRONG FIELD NAME
+ *   }));
+ *
+ * ROOT CAUSE:
+ *   The backend Pydantic model (api/quiz.py AnswerItem) expects:
+ *     class AnswerItem(BaseModel):
+ *         question_id: int
+ *         selected: str              ← backend field name
+ *
+ *   Pydantic v2 ignores unknown fields by default (extra="ignore" is the
+ *   default). So `selected_option` was silently ignored and `selected` was
+ *   treated as missing → Pydantic raised ValidationError → FastAPI returned
+ *   HTTP 422 Unprocessable Entity on EVERY quiz attempt submission.
+ *
+ * IMPACT:
+ *   • All quiz scores were NEVER saved to the database (every attempt = 422)
+ *   • QuizSession.percentage always stayed NULL
+ *   • The leaderboard was permanently empty for all users
+ *   • The result page could not show a persisted score
+ *
+ * FIX: Changed `selected_option` → `selected` to match the backend field.
  */
 import apiClient from "./apiClient";
 
@@ -15,7 +40,7 @@ export async function analyzePDF(file) {
     const res = await apiClient.post("/quiz/analyze", form, {
         timeout: 30_000,   // /analyze is fast — 30s is plenty
     });
-    return res.data; // { word_count, char_count, max_questions, difficulty, topics, page_count, size_mb }
+    return res.data;
 }
 
 // ── Quiz Generation ───────────────────────────────────────────────────────────
@@ -25,7 +50,7 @@ export async function analyzePDF(file) {
  * @param {number}   params.numQuestions
  * @param {string}   params.qType        e.g. "MCQ" | "TF" | "FIB" | "MCQ,TF"
  * @param {string}   params.difficulty   "Easy" | "Medium" | "Hard"
- * @param {string}   [params.topic]
+ * @param {string}   [params.topic]      optional focus topic
  * @param {Function} [params.onUploadProgress]  called with { loaded, total }
  */
 export async function generateQuiz({
@@ -38,9 +63,6 @@ export async function generateQuiz({
 }) {
     const form = new FormData();
     form.append("file", file);
-    form.append("num_questions", numQuestions);
-    form.append("q_type", qType);
-    form.append("difficulty", difficulty);
 
     const topicParam = topic ? `&topic=${encodeURIComponent(topic)}` : "";
     const res = await apiClient.post(
@@ -53,18 +75,22 @@ export async function generateQuiz({
                 : undefined,
         }
     );
-    return res.data; // { questions, quiz_session_id, chunk_count, word_count, max_questions }
+    return res.data;
 }
 
 // ── Submit Attempt ────────────────────────────────────────────────────────────
+/**
+ * FIX: `selected_option` renamed to `selected` to match backend AnswerItem model.
+ * The old field name caused HTTP 422 on every submission — scores were never saved.
+ */
 export async function submitAttempt(quizSessionId, questions, answers) {
     const answersPayload = questions.map((q) => ({
         question_id: q.id,
-        selected_option: answers[q.id] || "",
+        selected:    answers[q.id] || "",   // ← FIX: was `selected_option` (422 error)
     }));
     await apiClient.post("/quiz/attempt", {
         quiz_session_id: Number(quizSessionId),
-        answers: answersPayload,
+        answers:         answersPayload,
     });
 }
 
