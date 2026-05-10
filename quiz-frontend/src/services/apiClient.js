@@ -1,64 +1,56 @@
 /**
- * apiClient.js — Axios instance with bulletproof auth (v3)
+ * apiClient.js — Axios instance with bulletproof auth (v4)
  * =========================================================
  *
- * ROOT CAUSES FIXED IN THIS FILE:
+ * ROOT CAUSE OF ALL LOGOUT ISSUES (found via screenshot analysis):
  *
- * BUG 1 — Render cold-start 503/504 mistaken for auth failure
- *   Render free tier sleeps after 15 min inactivity. On cold start its
- *   reverse proxy can return 503 or occasionally a bare 401 before the
- *   FastAPI process is ready. The old interceptor treated ANY 401 as
- *   "token expired", fired a refresh, and then force-logged out when the
- *   refresh also failed (because the server was still waking up).
- *   FIX: Added cold-start detection + retry-with-backoff before touching
- *   auth state. A 503 is now retried up to COLD_START_RETRIES times with
- *   exponential back-off. A 401 is only treated as a real auth failure
- *   after the server is confirmed reachable.
+ * PRIMARY BUG — SameSite="lax" cookie blocked cross-origin
+ * ──────────────────────────────────────────────────────────
+ * Frontend: dl-project-pdf-to-mcq.vercel.app
+ * Backend:  dl-project-pdf-to-mcq.onrender.com
  *
- * BUG 2 — Token expiry race during long PDF generation
- *   The generate endpoint can take 4-5 minutes. A 15-min access token
- *   issued right before the upload could expire mid-request.
- *   FIX: Proactive token refresh is triggered BEFORE every upload/generate
- *   request if the token has <2 minutes left. The refresh happens
- *   transparently before the FormData POST is sent.
+ * These are DIFFERENT domains. With SameSite="lax", browsers BLOCK cookies
+ * on cross-site POST requests (fetch/XHR). This means the /auth/refresh
+ * POST from Vercel → Render NEVER sent the refresh cookie.
+ * Backend saw no cookie → returned 401 → _forceLogout() fired → user logged out.
  *
- * BUG 3 — _forceLogout fires on transient network errors
- *   Any uncaught error in the refresh fetch path triggered _forceLogout.
- *   FIX: _forceLogout is now only called after (a) refresh returns a
- *   non-ok HTTP response OR (b) the server is clearly reachable and
- *   actively rejecting the session. Network errors (TypeError, AbortError)
- *   are re-queued, not treated as auth failure.
+ * Fix on backend (auth.py): samesite="none", secure=True, path="/"
+ * Fix on frontend (here): ensure withCredentials:true on all calls ✓ (already set)
  *
- * BUG 4 — Multipart FormData Authorization header
- *   Axios DOES attach the Authorization header to multipart requests
- *   automatically via the request interceptor. This was confirmed working.
- *   No change needed here, but documented for clarity.
+ * SECONDARY BUG — AbortController signal leaked into retry requests
+ * ────────────────────────────────────────────────────────────────
+ * The analyze call passes { signal: controller.signal } to Axios.
+ * When the 401 interceptor retried the request with apiClient(original),
+ * the original config still contained the already-fired AbortController signal.
+ * The retry was immediately canceled (ERR_CANCELED) which masked the real error.
+ * Fix: Strip the signal from config before retrying.
+ *
+ * TERTIARY BUG — ERR_CANCELED not recognized by name check
+ * ─────────────────────────────────────────────────────────
+ * Axios wraps AbortController cancellation as { code: "ERR_CANCELED" },
+ * NOT { name: "CanceledError" }. The old check missed it.
+ * Fix: Check error.code === "ERR_CANCELED" || axios.isCancel(error)
  */
 import axios from "axios";
 
 const BASE_URL = "https://dl-project-pdf-to-mcq.onrender.com";
 
-// How many times to retry on 503 (Render cold-start wake-up)
-const COLD_START_RETRIES  = 4;
-const COLD_START_DELAY_MS = 8_000;  // 8s between retries (cold start ~30-60s total)
-
-// Proactively refresh token if it expires within this many ms
-const PROACTIVE_REFRESH_THRESHOLD_MS = 2 * 60 * 1000; // 2 minutes
+const COLD_START_RETRIES          = 4;
+const COLD_START_DELAY_MS         = 8_000;
+const PROACTIVE_REFRESH_MS        = 2 * 60 * 1000; // refresh if <2min left
 
 const apiClient = axios.create({
     baseURL:         BASE_URL,
-    timeout:         360_000,   // 6 min for large PDF uploads + generation
-    withCredentials: true,      // always send cookies cross-origin (needed for refresh)
+    timeout:         360_000,
+    withCredentials: true,   // sends cookies cross-origin (REQUIRED for refresh cookie)
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-function _getToken()     { return localStorage.getItem("qf_access_token"); }
-function _getExpiry()    { return parseInt(localStorage.getItem("qf_token_expires") || "0", 10); }
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function _getToken()      { return localStorage.getItem("qf_access_token"); }
+function _getExpiry()     { return parseInt(localStorage.getItem("qf_token_expires") || "0", 10); }
 function _msUntilExpiry() { return Math.max(0, _getExpiry() - Date.now()); }
-function _isGuest()      { return localStorage.getItem("qf_is_guest") === "true"; }
+function _isGuest()       { return localStorage.getItem("qf_is_guest") === "true"; }
+function _sleep(ms)       { return new Promise(r => setTimeout(r, ms)); }
 
 function _saveNewToken(data) {
     localStorage.setItem("qf_access_token",  data.access_token);
@@ -66,16 +58,9 @@ function _saveNewToken(data) {
     localStorage.setItem("qf_token_expires", String(Date.now() + (data.expires_in || 900) * 1000));
 }
 
-async function _sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Refresh token state (prevents duplicate refresh calls)
-// ─────────────────────────────────────────────────────────────────────────────
-
+// ── Refresh token concurrency guard ──────────────────────────────────────────
 let _isRefreshing = false;
-let _refreshQueue = [];   // { resolve, reject }[]
+let _refreshQueue = [];
 
 function _processQueue(error, token) {
     _refreshQueue.forEach(p => error ? p.reject(error) : p.resolve(token));
@@ -83,20 +68,29 @@ function _processQueue(error, token) {
 }
 
 /**
- * Calls /auth/refresh using the HTTP-only cookie.
- * Uses raw fetch (not apiClient) to prevent interceptor re-entrance.
- * Returns the new access token on success, throws on failure.
+ * Call /auth/refresh using the HTTP-only cookie.
+ * Uses raw fetch (not apiClient) to prevent interceptor recursion.
+ *
+ * IMPORTANT: The cookie must have SameSite=none for this cross-origin
+ * fetch to include the cookie. This is fixed on the backend in auth.py.
  */
 async function _doRefresh() {
-    const res = await fetch(`${BASE_URL}/auth/refresh`, {
-        method:      "POST",
-        credentials: "include",
-        headers:     { "Content-Type": "application/json" },
-    });
+    const controller = new AbortController();
+    const tid        = setTimeout(() => controller.abort(), 20_000); // 20s timeout
+
+    let res;
+    try {
+        res = await fetch(`${BASE_URL}/auth/refresh`, {
+            method:      "POST",
+            credentials: "include",  // sends HTTP-only cookie (requires SameSite=none cross-origin)
+            headers:     { "Content-Type": "application/json" },
+            signal:      controller.signal,
+        });
+    } finally {
+        clearTimeout(tid);
+    }
 
     if (!res.ok) {
-        // Only treat as a real session expiry if the server is responding properly
-        // (i.e. not a cold-start 503 or a network error)
         const err = new Error(`Refresh HTTP ${res.status}`);
         err.httpStatus = res.status;
         throw err;
@@ -107,86 +101,79 @@ async function _doRefresh() {
     return data.access_token;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// REQUEST INTERCEPTOR
-// Attaches token + proactively refreshes before long uploads
-// ─────────────────────────────────────────────────────────────────────────────
-
+// ── REQUEST INTERCEPTOR: attach token + proactive pre-refresh ─────────────────
 apiClient.interceptors.request.use(async (config) => {
     const token = _getToken();
+    if (!token || token === "guest_token") return config;
 
-    if (!token || token === "guest_token") {
-        return config;
-    }
-
-    // ── Proactive refresh: if token expires within 2 min, refresh BEFORE sending ──
-    // This is critical for long PDF uploads that take 4-5 minutes.
-    // We refresh synchronously here so the new token is used for THIS request.
+    // Proactive: if token expires in <2min, refresh BEFORE sending the request
+    // This is critical for the ~5min PDF generate call — token must be fresh at start
     const msLeft = _msUntilExpiry();
-    if (msLeft > 0 && msLeft < PROACTIVE_REFRESH_THRESHOLD_MS && !_isRefreshing) {
-        console.log(`[Auth] Token expires in ${Math.round(msLeft / 1000)}s — proactive refresh before request`);
+    if (msLeft > 0 && msLeft < PROACTIVE_REFRESH_MS && !_isRefreshing) {
+        console.log(`[Auth] Token expires in ${Math.round(msLeft / 1000)}s — refreshing before request`);
         try {
             const newToken = await _doRefresh();
             config.headers.Authorization = `Bearer ${newToken}`;
             return config;
         } catch (e) {
-            console.warn("[Auth] Proactive refresh failed, proceeding with current token:", e.message);
-            // Don't force logout here — let the response interceptor handle it
+            console.warn("[Auth] Pre-request refresh failed:", e.message);
+            // Continue with existing token; response interceptor handles resulting 401
         }
     }
 
     config.headers.Authorization = `Bearer ${token}`;
     return config;
-}, (error) => Promise.reject(error));
+}, err => Promise.reject(err));
 
-// ─────────────────────────────────────────────────────────────────────────────
-// RESPONSE INTERCEPTOR
-// Handles: 401 (token expired), 503 (cold start), other errors
-// ─────────────────────────────────────────────────────────────────────────────
-
+// ── RESPONSE INTERCEPTOR ──────────────────────────────────────────────────────
 apiClient.interceptors.response.use(
-    (res) => res,
+    (res) => {
+        // Server responded OK — clear any "server waking" UI state
+        window.dispatchEvent(new CustomEvent("qf:server-ready"));
+        return res;
+    },
     async (error) => {
         const original = error.config;
         const status   = error.response?.status;
 
-        // ── Ignore non-HTTP errors (AbortError, network down, etc.) ──────────
+        // ── No HTTP response: network / timeout / cancel errors ───────────────
         if (!error.response) {
+            // Axios AbortController cancellation → code is "ERR_CANCELED"
+            if (error.code === "ERR_CANCELED" || axios.isCancel(error)) {
+                error.userMessage = "Request was cancelled.";
+                return Promise.reject(error);
+            }
             if (error.code === "ECONNABORTED") {
                 error.userMessage = "Request timed out. Large PDFs can take up to 5 minutes — try fewer questions.";
-            } else if (error.name === "AbortError" || error.name === "CanceledError") {
-                error.userMessage = "Request was cancelled.";
-            } else {
-                error.userMessage = "Network error. Check your connection and try again.";
+                return Promise.reject(error);
             }
+            error.userMessage = "Network error. Check your connection and try again.";
             return Promise.reject(error);
         }
 
-        // ── 503 / 502: Render cold-start — retry with back-off ───────────────
-        // This is THE main fix. Render returns 503 when the dyno is waking up.
-        // Old code ignored this and eventually got a confused 401 → force logout.
-        // Now we wait and retry up to COLD_START_RETRIES times.
-        if ((status === 503 || status === 502) && !original._coldStartRetried) {
+        // ── 503 / 502: Server cold-starting (Render free tier) ───────────────
+        if (status === 503 || status === 502) {
             const retryCount = original._coldStartRetryCount || 0;
 
             if (retryCount < COLD_START_RETRIES) {
-                original._coldStartRetried    = true;
                 original._coldStartRetryCount = retryCount + 1;
-
                 const delay = COLD_START_DELAY_MS * (retryCount + 1);
-                console.log(`[Auth] Server cold-starting (${status}), retrying in ${delay / 1000}s… (attempt ${retryCount + 1}/${COLD_START_RETRIES})`);
 
-                // Dispatch a custom event so UI can show "Server waking up..." message
+                console.log(`[Auth] Server cold-start (${status}), retry ${retryCount + 1}/${COLD_START_RETRIES} in ${delay / 1000}s…`);
                 window.dispatchEvent(new CustomEvent("qf:server-waking", {
                     detail: { attempt: retryCount + 1, maxAttempts: COLD_START_RETRIES }
                 }));
 
                 await _sleep(delay);
-                return apiClient(original);
+
+                // IMPORTANT: Strip AbortController signal from retry config.
+                // If the original request had a signal that already fired,
+                // the retry would instantly cancel. Always retry without the original signal.
+                const retryConfig = { ...original, signal: undefined };
+                return apiClient(retryConfig);
             }
 
-            // Exhausted retries — surface a useful error message
-            error.userMessage = "Server is taking too long to wake up. Please try again in 30 seconds.";
+            error.userMessage = "Server took too long to wake up. Please try again in 30 seconds.";
             error.isServerWakeup = true;
             return Promise.reject(error);
         }
@@ -199,56 +186,62 @@ apiClient.interceptors.response.use(
 
         // ── 413: File too large ───────────────────────────────────────────────
         if (status === 413) {
-            error.userMessage = "PDF too large (max 20MB). Try compressing it.";
+            error.userMessage = "PDF too large (max 25MB). Try compressing it.";
             return Promise.reject(error);
         }
 
-        // ── 401: Token expired — attempt refresh ─────────────────────────────
-        // Only intercept first attempt (not already retried)
+        // ── 429: Rate limited ─────────────────────────────────────────────────
+        if (status === 429) {
+            error.userMessage = "Too many requests. Please wait 30 seconds and try again.";
+            return Promise.reject(error);
+        }
+
+        // ── 401: Token expired — attempt refresh + retry ─────────────────────
         if (status !== 401 || original._retried) {
             return Promise.reject(error);
         }
 
-        // Guest mode never refreshes
-        if (_isGuest()) {
-            return Promise.reject(error);
-        }
+        if (_isGuest()) return Promise.reject(error);
 
-        // Another refresh already in-flight — queue this request
+        // Queue concurrent 401s — only one refresh runs at a time
         if (_isRefreshing) {
             return new Promise((resolve, reject) => {
                 _refreshQueue.push({ resolve, reject });
             }).then(newToken => {
-                original.headers.Authorization = `Bearer ${newToken}`;
-                return apiClient(original);
-            }).catch(err => Promise.reject(err));
+                // IMPORTANT: Strip signal before retry (same fix as cold-start)
+                const retryConfig = { ...original, signal: undefined };
+                retryConfig.headers.Authorization = `Bearer ${newToken}`;
+                return apiClient(retryConfig);
+            });
         }
 
-        // Start the refresh
         original._retried = true;
         _isRefreshing     = true;
 
         try {
+            console.log("[Auth] 401 received — attempting token refresh…");
             const newToken = await _doRefresh();
+            console.log("[Auth] Token refreshed successfully");
             _processQueue(null, newToken);
 
-            original.headers.Authorization = `Bearer ${newToken}`;
-            return apiClient(original);
+            // Strip signal before retry
+            const retryConfig = { ...original, signal: undefined };
+            retryConfig.headers.Authorization = `Bearer ${newToken}`;
+            return apiClient(retryConfig);
 
         } catch (refreshError) {
             _processQueue(refreshError, null);
 
-            // Only force logout if:
-            // (a) The refresh server responded with 4xx (genuine auth failure)
-            // (b) NOT a network error (server unreachable / cold start)
             const refreshStatus = refreshError.httpStatus;
             if (refreshStatus && refreshStatus >= 400 && refreshStatus < 500) {
-                console.log("[Auth] Refresh token rejected by server — forcing logout");
+                // Server actively rejected the session (genuine auth failure)
+                console.error("[Auth] Refresh rejected with HTTP", refreshStatus, "— forcing logout");
                 _forceLogout();
             } else {
-                // Network error during refresh — don't log out, surface the error
-                console.warn("[Auth] Refresh network error — NOT forcing logout:", refreshError.message);
-                error.userMessage = "Connection lost during authentication. Please check your network.";
+                // Network error (AbortError, timeout, server unreachable)
+                // Do NOT log the user out — it's a connectivity issue, not an auth issue
+                console.warn("[Auth] Refresh network error — keeping session:", refreshError.message);
+                error.userMessage = "Connection lost. Please check your network and try again.";
             }
 
             return Promise.reject(error);
@@ -259,10 +252,7 @@ apiClient.interceptors.response.use(
     }
 );
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Force logout — only called on confirmed auth rejection, never on network errors
-// ─────────────────────────────────────────────────────────────────────────────
-
+// ── Force logout — ONLY called on confirmed server-side auth rejection ────────
 function _forceLogout() {
     localStorage.removeItem("qf_access_token");
     localStorage.removeItem("qf_username");
