@@ -1,16 +1,16 @@
 /**
- * GeneratePage (v3 — auth-stable)
- * =================================
+ * GeneratePage.js (v4 — deadlock-free progress)
+ * ================================================
  * FIXES:
- *  1. Removed ALL manual localStorage.removeItem("token") + navigate("/login") calls.
- *     The Axios interceptor in apiClient.js handles 401 automatically — pages should
- *     NEVER manually clear auth state. Doing so bypassed the refresh-token flow.
- *  2. `isGuest` now reads from AuthContext, not localStorage directly.
- *  3. No forced navigation on API errors — errors show inline instead.
+ *  1. Progress bar freezes at 88% — phase 3 now creeps 35→95% over 350s
+ *     (matches backend timeout). Bar is always moving. Only success sets 100%.
+ *  2. Timer leaks on retry/unmount — all IDs tracked in timerRefs Set.
+ *  3. res.data crash when analyze fails — result guarded with if (analyzeData).
+ *  4. Upload uses generateQuiz() from quizService (correct auth token key).
  */
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import API from "../api";
+import { generateQuiz, analyzePDF } from "../services/quizService";
 import { useAuthContext } from "../context/AuthContext";
 
 const PDF_META_KEY = "qf_last_pdf";
@@ -27,17 +27,12 @@ function savePdfMeta(meta) {
 function loadPdfMeta() {
     try { return JSON.parse(localStorage.getItem(PDF_META_KEY) || "null"); } catch { return null; }
 }
-export function clearPdfMeta() {
-    localStorage.removeItem(PDF_META_KEY);
-}
+export function clearPdfMeta() { localStorage.removeItem(PDF_META_KEY); }
 
 export default function GeneratePage() {
     const navigate     = useNavigate();
     const fileInputRef = useRef();
-
-    // ── Read guest flag from context (reactive) ───────────────────────────────
     const { isGuest, serverWaking } = useAuthContext();
-
     const saved = loadPdfMeta();
 
     const [file,          setFile]          = useState(null);
@@ -54,6 +49,7 @@ export default function GeneratePage() {
     const [selectedTopic, setSelectedTopic] = useState(saved?.selectedTopic || "");
     const [loading,       setLoading]       = useState(false);
     const [extracting,    setExtracting]    = useState(false);
+    const [uploadPct,     setUploadPct]     = useState(0);
     const [progress,      setProgress]      = useState(0);
     const [genPhase,      setGenPhase]      = useState(0);
     const [error,         setError]         = useState("");
@@ -61,178 +57,158 @@ export default function GeneratePage() {
     const [detailedExp,   setDetailedExp]   = useState(saved?.detailedExp ?? true);
     const [toast,         setToast]         = useState("");
 
+    // FIX 2: track every timer id — nothing leaks across retries or unmount
+    const timerRefs = useRef(new Set());
+    const clearAllTimers = useCallback(() => {
+        timerRefs.current.forEach(id => { clearInterval(id); clearTimeout(id); });
+        timerRefs.current.clear();
+    }, []);
+    useEffect(() => () => clearAllTimers(), [clearAllTimers]);
+
     useEffect(() => {
         if (!pdfMeta) return;
         savePdfMeta({ ...pdfMeta, numQuestions, qTypes, difficulty, detectedDiff, detailedExp, selectedTopic });
     }, [numQuestions, qTypes, difficulty, detectedDiff, detailedExp, selectedTopic, pdfMeta]);
 
-    const toggleType = (id) => {
-        setQTypes(prev =>
-            prev.includes(id)
-                ? prev.length > 1 ? prev.filter(t => t !== id) : prev
-                : [...prev, id]
-        );
-    };
+    const toggleType = (id) => setQTypes(prev =>
+        prev.includes(id) ? (prev.length > 1 ? prev.filter(t => t !== id) : prev) : [...prev, id]
+    );
 
     /* ── File selection ── */
-    const handleFileSelect = async (selectedFile) => {
+    const handleFileSelect = useCallback(async (selectedFile) => {
         if (!selectedFile || selectedFile.type !== "application/pdf") {
-            setError("Please upload a valid PDF file.");
-            return;
+            setError("Please upload a valid PDF file."); return;
         }
-        setFile(selectedFile);
-        setError("");
-        setExtracting(true);
-        setGenerated(null);
-        setWordCount(null);
-        setCharCount(null);
-        setMaxQ(50);
-        setNumQuestions(10);
+        setFile(selectedFile); setError(""); setExtracting(true);
+        setGenerated(null); setWordCount(null); setCharCount(null);
+        setMaxQ(50); setNumQuestions(10);
 
+        const baseMeta = { name: selectedFile.name, size: selectedFile.size };
         try {
             if (!isGuest) {
-                const formData = new FormData();
-                formData.append("file", selectedFile);
+                // FIX 3: only destructure if the call actually succeeded
+                let analyzeData = null;
+                try { analyzeData = await analyzePDF(selectedFile); }
+                catch (e) { console.warn("[Generate] Analyze (non-fatal):", e.message); }
 
-                const controller = new AbortController();
-                const timeout    = setTimeout(() => controller.abort(), 60_000); // 60s — large PDFs need time
-                let res;
-                try {
-                    res = await API.post("/quiz/analyze", formData, { signal: controller.signal });
-                } catch (analyzeErr) {
-                    clearTimeout(timeout);
-                    // ✅ NEVER manually handle 401 — apiClient interceptor handles it.
-                    // ✅ NEVER return early on AbortError — keep the file state so
-                    //    the user can still click Generate without re-uploading.
-                    // Just save basic metadata and fall through gracefully.
-                    console.warn("[Generate] Analyze failed (non-fatal):", analyzeErr.message);
-                    const meta = { name: selectedFile.name, size: selectedFile.size };
-                    savePdfMeta(meta);
-                    setPdfMeta(meta);
-                    // DO NOT return — fall through to setExtracting(false) in finally
-                }
-                clearTimeout(timeout);
-
-                // Only destructure if res exists (inner catch may have left res undefined)
-                if (!res || !res.data) {
-                    // Analyze failed — skip metadata extraction, user can still generate
-                    throw new Error("Analyze response missing — server may be waking up");
-                }
-
-                const { max_questions, detected_difficulty, word_count, char_count, topics: topicList } = res.data;
-                setMaxQ(max_questions);
-                setNumQuestions(Math.min(10, max_questions));
-                setDetectedDiff(detected_difficulty);
-                setDifficulty(detected_difficulty);
-                setWordCount(word_count);
-                setCharCount(char_count);
-                setTopics(topicList || []);
-                setSelectedTopic("");
-
-                const meta = {
-                    name: selectedFile.name, size: selectedFile.size,
-                    maxQ: max_questions, numQuestions: Math.min(10, max_questions),
-                    wordCount: word_count, charCount: char_count,
-                    detectedDiff: detected_difficulty, difficulty: detected_difficulty,
-                    topics: topicList || [], qTypes: ["MCQ"], selectedTopic: "", detailedExp: true,
-                };
-                savePdfMeta(meta);
-                setPdfMeta(meta);
-            } else {
-                const meta = { name: selectedFile.name, size: selectedFile.size };
-                savePdfMeta(meta);
-                setPdfMeta(meta);
-            }
+                if (analyzeData) {
+                    const { max_questions, detected_difficulty, word_count, char_count, topics: topicList } = analyzeData;
+                    setMaxQ(max_questions); setNumQuestions(Math.min(10, max_questions));
+                    setDetectedDiff(detected_difficulty); setDifficulty(detected_difficulty);
+                    setWordCount(word_count); setCharCount(char_count);
+                    setTopics(topicList || []); setSelectedTopic("");
+                    const richMeta = {
+                        name: selectedFile.name, size: selectedFile.size,
+                        maxQ: max_questions, numQuestions: Math.min(10, max_questions),
+                        wordCount: word_count, charCount: char_count,
+                        detectedDiff: detected_difficulty, difficulty: detected_difficulty,
+                        topics: topicList || [], qTypes: ["MCQ"], selectedTopic: "", detailedExp: true,
+                    };
+                    savePdfMeta(richMeta); setPdfMeta(richMeta);
+                } else { savePdfMeta(baseMeta); setPdfMeta(baseMeta); }
+            } else { savePdfMeta(baseMeta); setPdfMeta(baseMeta); }
         } catch (e) {
-            // ✅ Never manually clear auth or navigate to login on catch.
-            // The interceptor already handles 401 globally.
-            console.warn("Analyze failed:", e.message);
-            const meta = { name: selectedFile.name, size: selectedFile.size };
-            savePdfMeta(meta);
-            setPdfMeta(meta);
-        } finally {
-            setExtracting(false);
-        }
-    };
+            console.warn("handleFileSelect unexpected:", e.message);
+            savePdfMeta(baseMeta); setPdfMeta(baseMeta);
+        } finally { setExtracting(false); }
+    }, [isGuest]);
 
     const handleClearPdf = () => {
-        setFile(null); setPdfMeta(null);
-        localStorage.removeItem(PDF_META_KEY);
+        setFile(null); setPdfMeta(null); localStorage.removeItem(PDF_META_KEY);
         setGenerated(null); setWordCount(null); setCharCount(null);
         setMaxQ(50); setNumQuestions(10); setTopics([]); setSelectedTopic("");
         setDetectedDiff(null); setDifficulty("Medium"); setError("");
     };
 
-    const handleDrop = (e) => {
-        e.preventDefault(); setDragging(false);
-        handleFileSelect(e.dataTransfer.files[0]);
-    };
+    const handleDrop = (e) => { e.preventDefault(); setDragging(false); handleFileSelect(e.dataTransfer.files[0]); };
 
     /* ── Generate ── */
     const handleGenerate = async () => {
-        if (!file)    { setError("Please select a PDF file first."); return; }
-        if (isGuest)  { setError("Guest mode: please sign up to use AI generation."); return; }
-        setError(""); setLoading(true); setProgress(5); setGenPhase(1);
+        if (!file)   { setError("Please select a PDF file first."); return; }
+        if (isGuest) { setError("Guest mode: please sign up to use AI generation."); return; }
 
-        let tick;
-        const runPhase = (from, to, phase, durationMs) => {
+        setError(""); setLoading(true); setProgress(5); setGenPhase(1); setUploadPct(0);
+        clearAllTimers();   // clear timers from any previous run
+
+        // ── FIX 1: Two-stage progress system ─────────────────────────────────
+        // Stage 1 — parse (5→20%) + chunk (20→35%) in ~1.5 seconds
+        // Stage 2 — AI phase creeps 35→95% over 350s (matches backend timeout).
+        //   Deliberately never reaches 100 via timer.
+        //   Only success handler sets 100. Always visibly moving, never frozen.
+        const MAX_WAIT_MS = 350_000;
+        const AI_FROM = 35, AI_TO = 95;
+        const AI_STEP_MS = Math.floor(MAX_WAIT_MS / (AI_TO - AI_FROM)); // ~5833ms / 1%
+
+        const runFastPhase = (from, to, phase, durationMs) => {
             setGenPhase(phase);
-            const steps    = Math.ceil((to - from) / 3);
-            const interval = durationMs / steps;
-            let current    = from;
-            tick = setInterval(() => {
+            const steps = Math.ceil((to - from) / 3);
+            const interval = Math.max(50, Math.floor(durationMs / steps));
+            let current = from;
+            const id = setInterval(() => {
                 current = Math.min(current + 3, to);
                 setProgress(current);
-                if (current >= to) clearInterval(tick);
+                if (current >= to) { clearInterval(id); timerRefs.current.delete(id); }
             }, interval);
+            timerRefs.current.add(id);
         };
 
-        runPhase(5, 20, 1, 800);
-        setTimeout(() => runPhase(20, 35, 2, 600),   900);
-        setTimeout(() => runPhase(35, 88, 3, 35000), 1600);
+        const startAIPhase = () => {
+            setGenPhase(3);
+            let current = AI_FROM;
+            const id = setInterval(() => {
+                current = Math.min(current + 1, AI_TO);
+                setProgress(current);
+                // intentionally no clearInterval here — stays alive until clearAllTimers()
+            }, AI_STEP_MS);
+            timerRefs.current.add(id);
+        };
+
+        runFastPhase(5, 20, 1, 800);
+        const t1 = setTimeout(() => runFastPhase(20, 35, 2, 600),  900);
+        const t2 = setTimeout(() => startAIPhase(),               1600);
+        timerRefs.current.add(t1); timerRefs.current.add(t2);
 
         try {
-            const formData = new FormData();
-            formData.append("file",          file);
-            formData.append("num_questions", numQuestions);
-            formData.append("q_type",        qTypes.join(","));
-            formData.append("difficulty",    difficulty);
+            // FIX 4: generateQuiz from quizService uses apiClient with correct
+            // "qf_access_token" key + 360s timeout + upload progress callback
+            const data = await generateQuiz({
+                file, numQuestions, qType: qTypes.join(","), difficulty,
+                topic: selectedTopic || undefined,
+                onUploadProgress: ({ loaded, total }) => {
+                    if (total) setUploadPct(Math.round((loaded / total) * 100));
+                },
+            });
 
-            const topicParam = selectedTopic ? `&topic=${encodeURIComponent(selectedTopic)}` : "";
-            const res = await API.post(
-                `/quiz/generate?num_questions=${numQuestions}&q_type=${qTypes.join(",")}&difficulty=${difficulty}${topicParam}`,
-                formData
-            );
+            clearAllTimers(); setProgress(100); setGenPhase(4);
 
-            setProgress(100);
-            setGenPhase(4);
-            clearInterval(tick);
-
-            const questions    = res.data.questions || [];
-            const quizSessionId = res.data.quiz_session_id;
+            const questions     = data.questions || [];
+            const quizSessionId = data.quiz_session_id;
             localStorage.setItem("qg_questions",  JSON.stringify(questions));
             localStorage.setItem("qg_session_id", String(quizSessionId));
             localStorage.setItem("qg_pdf_name",   file.name);
             setGenerated({ questions, quizSessionId, pdfName: file.name });
             setToast(`✅ ${questions.length} questions generated! Head to Study Mode to begin.`);
-            setTimeout(() => setToast(""), 5000);
+            timerRefs.current.add(setTimeout(() => setToast(""), 5000));
+
         } catch (e) {
-            clearInterval(tick);
+            clearAllTimers();
             const status = e.response?.status;
-            // ✅ Do NOT manually handle 401 — interceptor already redirected.
-            // Only show inline errors for non-auth failures.
-            if (status === 401) return; // interceptor already handled this
-            const detail = e.response?.data?.detail;
+            if (status === 401) return; // interceptor already handled
+            const userMsg = e.userMessage;
+            const detail  = e.response?.data?.detail;
             setError(
+                userMsg                              ? userMsg :
                 detail && detail !== "Invalid token" ? detail :
                 status === 422 ? "Invalid request — check your file or settings." :
                 status === 413 ? "PDF too large. Try a smaller file (max 20 MB)." :
                 status === 429 ? "AI rate limit reached. Please wait 30 seconds and retry." :
                 status === 503 ? "AI service temporarily unavailable. Please retry in a moment." :
-                "Generation failed. Try fewer questions or re-upload the PDF."
+                status === 504 ? "Generation timed out. Try fewer questions or a smaller PDF." :
+                                 "Generation failed. Try fewer questions or re-upload the PDF."
             );
         } finally {
-            setTimeout(() => { setLoading(false); setProgress(0); setGenPhase(0); }, 600);
+            setUploadPct(0);
+            timerRefs.current.add(setTimeout(() => { setLoading(false); setProgress(0); setGenPhase(0); }, 600));
         }
     };
 
@@ -242,19 +218,14 @@ export default function GeneratePage() {
     };
 
     const GEN_STEPS = [
-        { id: 1, label: "Parsing PDF" },
-        { id: 2, label: "Chunking" },
-        { id: 3, label: "AI Generating" },
-        { id: 4, label: "Saving" },
+        { id: 1, label: "Parsing PDF" }, { id: 2, label: "Chunking" },
+        { id: 3, label: "AI Generating" }, { id: 4, label: "Saving" },
     ];
 
     return (
         <div style={{ background: "var(--bg)", minHeight: "calc(100vh - 60px)", paddingBottom: "4rem" }}>
             <div className="generate-page-inner">
-
-                <div className="breadcrumb" style={{ marginBottom: ".75rem" }}>
-                    WORKSPACE <span>›</span> CREATION ENGINE
-                </div>
+                <div className="breadcrumb" style={{ marginBottom: ".75rem" }}>WORKSPACE <span>›</span> CREATION ENGINE</div>
                 <h1 className="page-title" style={{ marginBottom: ".35rem" }}>Generate Study Material</h1>
                 <p className="page-subtitle" style={{ marginBottom: "2rem" }}>
                     Upload your lecture notes or textbooks to create AI-powered practice quizzes and flashcards.
@@ -266,28 +237,16 @@ export default function GeneratePage() {
                     onChange={(e) => handleFileSelect(e.target.files[0])} />
 
                 {!file && !pdfMeta ? (
-                    <div
-                        className={`upload-zone${dragging ? " dragging" : ""}`}
-                        style={{ marginBottom: "1.5rem" }}
+                    <div className={`upload-zone${dragging ? " dragging" : ""}`} style={{ marginBottom: "1.5rem" }}
                         onClick={() => fileInputRef.current?.click()}
                         onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
-                        onDragLeave={() => setDragging(false)}
-                        onDrop={handleDrop}
-                    >
-                        <div style={{
-                            width: "52px", height: "52px", borderRadius: "50%",
-                            background: "var(--navy-muted)", display: "flex", alignItems: "center",
-                            justifyContent: "center", margin: "0 auto .875rem", fontSize: "1.5rem",
-                        }}>📤</div>
-                        <div style={{ fontWeight: 700, fontSize: "1.1rem", color: "var(--navy)", marginBottom: ".5rem" }}>
-                            Upload your PDF
-                        </div>
+                        onDragLeave={() => setDragging(false)} onDrop={handleDrop}>
+                        <div style={{ width: "52px", height: "52px", borderRadius: "50%", background: "var(--navy-muted)", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto .875rem", fontSize: "1.5rem" }}>📤</div>
+                        <div style={{ fontWeight: 700, fontSize: "1.1rem", color: "var(--navy)", marginBottom: ".5rem" }}>Upload your PDF</div>
                         <p style={{ fontSize: ".85rem", color: "var(--text-muted)", maxWidth: "320px", margin: "0 auto .875rem", lineHeight: 1.65 }}>
                             Drag and drop your study material here, or click to browse files. Supports PDF documents up to 20MB.
                         </p>
-                        <button className="btn btn-primary" style={{ margin: "0 auto", pointerEvents: "none" }}>
-                            📎 Select Document
-                        </button>
+                        <button className="btn btn-primary" style={{ margin: "0 auto", pointerEvents: "none" }}>📎 Select Document</button>
                     </div>
                 ) : (
                     <div className="card" style={{ marginBottom: "1.5rem" }}>
@@ -311,29 +270,17 @@ export default function GeneratePage() {
                                             fontSize: ".68rem", fontWeight: 700, padding: ".15rem .5rem", borderRadius: "999px",
                                             background: (detectedDiff || pdfMeta.detectedDiff) === "Easy" ? "var(--success-bg)" : (detectedDiff || pdfMeta.detectedDiff) === "Hard" ? "var(--danger-bg)" : "var(--warning-bg)",
                                             color: (detectedDiff || pdfMeta.detectedDiff) === "Easy" ? "var(--success)" : (detectedDiff || pdfMeta.detectedDiff) === "Hard" ? "var(--danger)" : "var(--warning)",
-                                        }}>
-                                            AI: {detectedDiff || pdfMeta.detectedDiff}
-                                        </span>
+                                        }}>AI: {detectedDiff || pdfMeta.detectedDiff}</span>
                                     )}
                                     {extracting && <span style={{ fontSize: ".68rem", fontWeight: 600, color: "var(--accent)" }}>Analysing…</span>}
                                 </div>
                                 {!file && pdfMeta && (
-                                    <div style={{
-                                        marginTop: ".4rem", fontSize: ".7rem",
-                                        color: "var(--warning)", fontWeight: 600,
-                                        display: "flex", alignItems: "center", gap: ".3rem", flexWrap: "wrap",
-                                    }}>
-                                        ⚠️ PDF not loaded — click <span
-                                            style={{ color: "var(--navy)", cursor: "pointer", textDecoration: "underline" }}
-                                            onClick={() => fileInputRef.current?.click()}
-                                        >Upload again</span> to generate, or Change to pick a different file.
+                                    <div style={{ marginTop: ".4rem", fontSize: ".7rem", color: "var(--warning)", fontWeight: 600, display: "flex", alignItems: "center", gap: ".3rem", flexWrap: "wrap" }}>
+                                        ⚠️ PDF not loaded — click <span style={{ color: "var(--navy)", cursor: "pointer", textDecoration: "underline" }} onClick={() => fileInputRef.current?.click()}>Upload again</span> to generate, or Change to pick a different file.
                                     </div>
                                 )}
                             </div>
-                            <button className="btn btn-outline btn-sm" style={{ flexShrink: 0 }}
-                                onClick={handleClearPdf}>
-                                Change
-                            </button>
+                            <button className="btn btn-outline btn-sm" style={{ flexShrink: 0 }} onClick={handleClearPdf}>Change</button>
                         </div>
                     </div>
                 )}
@@ -341,32 +288,15 @@ export default function GeneratePage() {
                 {file && !extracting && wordCount && (
                     <>
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: ".75rem" }}>
-                            <div style={{ fontSize: ".65rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".12em", color: "var(--text-light)", display: "flex", alignItems: "center", gap: ".4rem" }}>
-                                📋 DOCUMENT ANALYSIS
-                            </div>
-                            <div style={{ fontSize: ".72rem", fontWeight: 600, color: "var(--success)", display: "flex", alignItems: "center", gap: ".25rem" }}>
-                                ✓ Successfully Parsed
-                            </div>
+                            <div style={{ fontSize: ".65rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".12em", color: "var(--text-light)" }}>📋 DOCUMENT ANALYSIS</div>
+                            <div style={{ fontSize: ".72rem", fontWeight: 600, color: "var(--success)" }}>✓ Successfully Parsed</div>
                         </div>
                         <div className="doc-stats-row" style={{ marginBottom: topics.length ? ".875rem" : "1.5rem" }}>
-                            <div className="doc-stat-cell">
-                                <div className="doc-stat-label">Word Count</div>
-                                <div className="doc-stat-value">{wordCount?.toLocaleString()}</div>
-                            </div>
-                            <div className="doc-stat-cell">
-                                <div className="doc-stat-label">Characters</div>
-                                <div className="doc-stat-value">{charCount?.toLocaleString() ?? "—"}</div>
-                            </div>
-                            <div className="doc-stat-cell">
-                                <div className="doc-stat-label">File Size</div>
-                                <div className="doc-stat-value">{(file.size / 1024 / 1024).toFixed(1)} MB</div>
-                            </div>
-                            <div className="doc-stat-cell">
-                                <div className="doc-stat-label">Available Questions</div>
-                                <div className="doc-stat-value">{maxQ} Max</div>
-                            </div>
+                            <div className="doc-stat-cell"><div className="doc-stat-label">Word Count</div><div className="doc-stat-value">{wordCount?.toLocaleString()}</div></div>
+                            <div className="doc-stat-cell"><div className="doc-stat-label">Characters</div><div className="doc-stat-value">{charCount?.toLocaleString() ?? "—"}</div></div>
+                            <div className="doc-stat-cell"><div className="doc-stat-label">File Size</div><div className="doc-stat-value">{(file.size / 1024 / 1024).toFixed(1)} MB</div></div>
+                            <div className="doc-stat-cell"><div className="doc-stat-label">Available Questions</div><div className="doc-stat-value">{maxQ} Max</div></div>
                         </div>
-
                         {topics.length > 0 && (
                             <div style={{ marginBottom: "1.5rem" }}>
                                 <div style={{ fontSize: ".65rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".1em", color: "var(--text-light)", marginBottom: ".5rem" }}>
@@ -374,17 +304,13 @@ export default function GeneratePage() {
                                 </div>
                                 <div style={{ display: "flex", flexWrap: "wrap", gap: ".4rem" }}>
                                     {["All Topics", ...topics].map(t => (
-                                        <button key={t}
-                                            onClick={() => setSelectedTopic(t === "All Topics" ? "" : t)}
-                                            style={{
-                                                padding: ".3rem .75rem", borderRadius: "999px", fontSize: ".72rem", fontWeight: 600,
-                                                border: `1.5px solid ${(t === "All Topics" ? "" : t) === selectedTopic ? "var(--navy)" : "var(--border)"}`,
-                                                background: (t === "All Topics" ? "" : t) === selectedTopic ? "var(--navy-muted)" : "var(--surface)",
-                                                color: (t === "All Topics" ? "" : t) === selectedTopic ? "var(--navy)" : "var(--text-muted)",
-                                                cursor: "pointer", transition: "all .12s",
-                                            }}>
-                                            {t}
-                                        </button>
+                                        <button key={t} onClick={() => setSelectedTopic(t === "All Topics" ? "" : t)} style={{
+                                            padding: ".3rem .75rem", borderRadius: "999px", fontSize: ".72rem", fontWeight: 600,
+                                            border: `1.5px solid ${(t === "All Topics" ? "" : t) === selectedTopic ? "var(--navy)" : "var(--border)"}`,
+                                            background: (t === "All Topics" ? "" : t) === selectedTopic ? "var(--navy-muted)" : "var(--surface)",
+                                            color: (t === "All Topics" ? "" : t) === selectedTopic ? "var(--navy)" : "var(--text-muted)",
+                                            cursor: "pointer", transition: "all .12s",
+                                        }}>{t}</button>
                                     ))}
                                 </div>
                             </div>
@@ -399,16 +325,11 @@ export default function GeneratePage() {
                                 <div style={{ fontWeight: 700, fontSize: "1rem", color: "var(--navy)", marginBottom: ".25rem" }}>Question Configuration</div>
                                 <div style={{ fontSize: ".8rem", color: "var(--text-muted)" }}>Select how many practice questions you want to generate.</div>
                             </div>
-                            <div style={{
-                                display: "flex", alignItems: "baseline", gap: ".3rem",
-                                background: "var(--navy)", color: "#fff",
-                                padding: ".4rem .875rem", borderRadius: "8px",
-                            }}>
+                            <div style={{ display: "flex", alignItems: "baseline", gap: ".3rem", background: "var(--navy)", color: "#fff", padding: ".4rem .875rem", borderRadius: "8px" }}>
                                 <span style={{ fontSize: "1.375rem", fontWeight: 800 }}>{numQuestions}</span>
                                 <span style={{ fontSize: ".65rem", fontWeight: 700, opacity: .7, textTransform: "uppercase", letterSpacing: ".08em" }}>QUESTIONS</span>
                             </div>
                         </div>
-
                         <input type="range" className="form-range" min={1} max={maxQ} value={numQuestions}
                             onChange={(e) => setNumQuestions(+e.target.value)}
                             style={{ width: "100%", marginBottom: ".5rem", accentColor: "var(--navy)" }} />
@@ -417,37 +338,16 @@ export default function GeneratePage() {
                             {[15, 25, 35, 45].filter(t => t < maxQ).map(t => <span key={t}>{t}</span>)}
                             <span>{maxQ} QUESTIONS</span>
                         </div>
-
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: ".875rem" }}>
                             {Q_TYPES.map(({ id, label, desc }) => (
-                                <label key={id} style={{
-                                    display: "flex", alignItems: "center", gap: ".75rem",
-                                    padding: ".7rem .875rem", borderRadius: "var(--radius-sm)",
-                                    border: `1.5px solid ${qTypes.includes(id) ? "var(--navy)" : "var(--border)"}`,
-                                    background: qTypes.includes(id) ? "var(--navy-muted)" : "var(--card)",
-                                    cursor: "pointer", transition: "all .15s", minHeight: "48px",
-                                }}>
-                                    <input type="checkbox" checked={qTypes.includes(id)} onChange={() => toggleType(id)}
-                                        style={{ accentColor: "var(--navy)", width: "15px", height: "15px", flexShrink: 0 }} />
-                                    <div>
-                                        <div style={{ fontWeight: 600, fontSize: ".85rem", color: "var(--navy)" }}>{label}</div>
-                                        <div style={{ fontSize: ".72rem", color: "var(--text-muted)" }}>{desc}</div>
-                                    </div>
+                                <label key={id} style={{ display: "flex", alignItems: "center", gap: ".75rem", padding: ".7rem .875rem", borderRadius: "var(--radius-sm)", border: `1.5px solid ${qTypes.includes(id) ? "var(--navy)" : "var(--border)"}`, background: qTypes.includes(id) ? "var(--navy-muted)" : "var(--card)", cursor: "pointer", transition: "all .15s", minHeight: "48px" }}>
+                                    <input type="checkbox" checked={qTypes.includes(id)} onChange={() => toggleType(id)} style={{ accentColor: "var(--navy)", width: "15px", height: "15px", flexShrink: 0 }} />
+                                    <div><div style={{ fontWeight: 600, fontSize: ".85rem", color: "var(--navy)" }}>{label}</div><div style={{ fontSize: ".72rem", color: "var(--text-muted)" }}>{desc}</div></div>
                                 </label>
                             ))}
-                            <label style={{
-                                display: "flex", alignItems: "center", gap: ".75rem",
-                                padding: ".7rem .875rem", borderRadius: "var(--radius-sm)",
-                                border: `1.5px solid ${detailedExp ? "var(--navy)" : "var(--border)"}`,
-                                background: detailedExp ? "var(--navy-muted)" : "var(--card)",
-                                cursor: "pointer", transition: "all .15s", minHeight: "48px",
-                            }}>
-                                <input type="checkbox" checked={detailedExp} onChange={() => setDetailedExp(p => !p)}
-                                    style={{ accentColor: "var(--navy)", width: "15px", height: "15px", flexShrink: 0 }} />
-                                <div>
-                                    <div style={{ fontWeight: 600, fontSize: ".85rem", color: "var(--navy)" }}>Detailed Explanations</div>
-                                    <div style={{ fontSize: ".72rem", color: "var(--text-muted)" }}>Include reasoning for each answer</div>
-                                </div>
+                            <label style={{ display: "flex", alignItems: "center", gap: ".75rem", padding: ".7rem .875rem", borderRadius: "var(--radius-sm)", border: `1.5px solid ${detailedExp ? "var(--navy)" : "var(--border)"}`, background: detailedExp ? "var(--navy-muted)" : "var(--card)", cursor: "pointer", transition: "all .15s", minHeight: "48px" }}>
+                                <input type="checkbox" checked={detailedExp} onChange={() => setDetailedExp(p => !p)} style={{ accentColor: "var(--navy)", width: "15px", height: "15px", flexShrink: 0 }} />
+                                <div><div style={{ fontWeight: 600, fontSize: ".85rem", color: "var(--navy)" }}>Detailed Explanations</div><div style={{ fontSize: ".72rem", color: "var(--text-muted)" }}>Include reasoning for each answer</div></div>
                             </label>
                         </div>
                     </div>
@@ -461,48 +361,44 @@ export default function GeneratePage() {
                         </div>
                         <div style={{ display: "flex", gap: ".5rem" }}>
                             {["Easy", "Medium", "Hard"].map(d => (
-                                <button key={d} onClick={() => setDifficulty(d)}
-                                    style={{
-                                        flex: 1, padding: ".55rem", borderRadius: "var(--radius-sm)", fontWeight: 600, fontSize: ".82rem",
-                                        border: `1.5px solid ${difficulty === d ? (d === "Easy" ? "var(--success)" : d === "Hard" ? "var(--danger)" : "var(--warning)") : "var(--border)"}`,
-                                        background: difficulty === d ? (d === "Easy" ? "var(--success-bg)" : d === "Hard" ? "var(--danger-bg)" : "var(--warning-bg)") : "var(--card)",
-                                        color: difficulty === d ? (d === "Easy" ? "var(--success)" : d === "Hard" ? "var(--danger)" : "var(--warning)") : "var(--text-muted)",
-                                        cursor: "pointer", transition: "all .15s",
-                                    }}>
-                                    {d === "Easy" ? "🟢" : d === "Hard" ? "🔴" : "🟡"} {d}
-                                </button>
+                                <button key={d} onClick={() => setDifficulty(d)} style={{
+                                    flex: 1, padding: ".55rem", borderRadius: "var(--radius-sm)", fontWeight: 600, fontSize: ".82rem",
+                                    border: `1.5px solid ${difficulty === d ? (d === "Easy" ? "var(--success)" : d === "Hard" ? "var(--danger)" : "var(--warning)") : "var(--border)"}`,
+                                    background: difficulty === d ? (d === "Easy" ? "var(--success-bg)" : d === "Hard" ? "var(--danger-bg)" : "var(--warning-bg)") : "var(--card)",
+                                    color: difficulty === d ? (d === "Easy" ? "var(--success)" : d === "Hard" ? "var(--danger)" : "var(--warning)") : "var(--text-muted)",
+                                    cursor: "pointer", transition: "all .15s",
+                                }}>{d === "Easy" ? "🟢" : d === "Hard" ? "🔴" : "🟡"} {d}</button>
                             ))}
                         </div>
                     </div>
                 )}
 
                 {serverWaking && (
-                    <div style={{
-                        background: "rgba(251,191,36,.12)", border: "1px solid rgba(251,191,36,.4)",
-                        borderRadius: "10px", padding: ".75rem 1rem", marginBottom: "1rem",
-                        fontSize: ".82rem", color: "#92400E", display: "flex", alignItems: "center", gap: ".625rem",
-                    }}>
+                    <div style={{ background: "rgba(251,191,36,.12)", border: "1px solid rgba(251,191,36,.4)", borderRadius: "10px", padding: ".75rem 1rem", marginBottom: "1rem", fontSize: ".82rem", color: "#92400E", display: "flex", alignItems: "center", gap: ".625rem" }}>
                         <span style={{ fontSize: "1.1rem", animation: "spin .8s linear infinite", display: "inline-block" }}>⚙</span>
-                        <div>
-                            <strong>Server is waking up…</strong>
-                            <div style={{ opacity: .8, marginTop: ".1rem" }}>
-                                Render free-tier servers sleep after inactivity. Your request will be retried automatically — no need to do anything.
-                            </div>
-                        </div>
+                        <div><strong>Server is waking up…</strong><div style={{ opacity: .8, marginTop: ".1rem" }}>Render free-tier servers sleep after inactivity. Your request will be retried automatically.</div></div>
                     </div>
                 )}
 
                 {file && (
-                    <button className="btn btn-primary btn-full"
-                        style={{ fontSize: ".95rem", marginBottom: "1.25rem", minHeight: "52px" }}
-                        disabled={loading || extracting || isGuest}
-                        onClick={handleGenerate}>
+                    <button className="btn btn-primary btn-full" style={{ fontSize: ".95rem", marginBottom: "1.25rem", minHeight: "52px" }}
+                        disabled={loading || extracting || isGuest} onClick={handleGenerate}>
                         {loading ? "✦ Generating…" : "✦ Generate Study Questions"}
                     </button>
                 )}
 
                 {loading && (
                     <div className="gen-progress-wrap">
+                        {uploadPct > 0 && uploadPct < 100 && (
+                            <div style={{ marginBottom: ".75rem" }}>
+                                <div style={{ display: "flex", justifyContent: "space-between", fontSize: ".7rem", fontWeight: 600, color: "var(--text-muted)", marginBottom: ".35rem" }}>
+                                    <span>⬆ Uploading PDF…</span><span>{uploadPct}%</span>
+                                </div>
+                                <div style={{ height: "4px", background: "var(--border)", borderRadius: "2px" }}>
+                                    <div style={{ height: "100%", width: `${uploadPct}%`, background: "var(--accent)", borderRadius: "2px", transition: "width .2s" }} />
+                                </div>
+                            </div>
+                        )}
                         <div className="gen-progress-header">
                             <div className="gen-progress-title">
                                 <span style={{ animation: "spin .8s linear infinite", display: "inline-block", fontSize: "1rem" }}>⚙</span>
@@ -522,18 +418,15 @@ export default function GeneratePage() {
                                 const state = genPhase > step.id ? "done" : genPhase === step.id ? "active" : "";
                                 return (
                                     <div key={step.id} className={`gen-step${state ? " " + state : ""}`}>
-                                        <div className="gen-step-dot" />
-                                        {state === "done" ? "✓ " : ""}{step.label}
+                                        <div className="gen-step-dot" />{state === "done" ? "✓ " : ""}{step.label}
                                     </div>
                                 );
                             })}
                         </div>
                         <div className="gen-eta">
-                            {genPhase <= 2
-                                ? "Analysing document structure…"
-                                : genPhase === 3
-                                    ? `Generating ${numQuestions} questions in parallel — usually under 30s`
-                                    : "Almost done!"}
+                            {genPhase <= 2 ? "Analysing document structure…"
+                                : genPhase === 3 ? `Generating ${numQuestions} questions — large PDFs can take 2–4 minutes`
+                                : "Almost done!"}
                         </div>
                     </div>
                 )}
@@ -541,21 +434,12 @@ export default function GeneratePage() {
                 {isGuest && file && (
                     <div className="alert alert-info">
                         🔒 AI generation requires an account.{" "}
-                        <span style={{ fontWeight: 700, cursor: "pointer", textDecoration: "underline" }}
-                            onClick={() => navigate("/register")}>Sign up free →</span>
+                        <span style={{ fontWeight: 700, cursor: "pointer", textDecoration: "underline" }} onClick={() => navigate("/register")}>Sign up free →</span>
                     </div>
                 )}
 
                 {toast && (
-                    <div style={{
-                        position: "fixed", bottom: "2rem", left: "50%", transform: "translateX(-50%)",
-                        background: "#1B2B4B", color: "#fff",
-                        padding: ".875rem 1.75rem", borderRadius: "12px",
-                        boxShadow: "0 8px 32px rgba(0,0,0,.25)",
-                        fontSize: ".875rem", fontWeight: 600, zIndex: 9999,
-                        display: "flex", alignItems: "center", gap: ".75rem",
-                        animation: "scaleIn .25s ease",
-                    }}>
+                    <div style={{ position: "fixed", bottom: "2rem", left: "50%", transform: "translateX(-50%)", background: "#1B2B4B", color: "#fff", padding: ".875rem 1.75rem", borderRadius: "12px", boxShadow: "0 8px 32px rgba(0,0,0,.25)", fontSize: ".875rem", fontWeight: 600, zIndex: 9999, display: "flex", alignItems: "center", gap: ".75rem", animation: "scaleIn .25s ease" }}>
                         <span>{toast}</span>
                         <button onClick={() => setToast("")} style={{ background: "none", border: "none", color: "rgba(255,255,255,.6)", cursor: "pointer", fontSize: "1rem", padding: 0 }}>✕</button>
                     </div>
