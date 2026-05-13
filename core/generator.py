@@ -1,29 +1,27 @@
 """
-core/generator.py — Scalable Parallel Chunked MCQ Generator (v3 — large-PDF stable)
-=====================================================================================
+core/generator.py — Deadlock-Free Parallel MCQ Generator (v4)
+==============================================================
 
-ROOT CAUSES FIXED IN THIS FILE
-───────────────────────────────
-BUG 1 — Synchronous chunk_text_list() blocks the asyncio event loop
-  LOCATION : _generate_single(), was `chunks = chunk_text_list(text)`
-  SYMPTOM  : For a large PDF (10,000+ words of extracted text), the chunker
-             iterates every sentence with regex. Pure CPU work on the event loop
-             thread freezes it for 0.5–3 seconds. Render health checks get no
-             response → dyno marked unhealthy → restarted → job gone.
-  FIX      : chunks = await asyncio.to_thread(chunk_text_list, text)
+BUGS FIXED (all caused the 88% freeze):
 
-BUG 2 — Groq rate-limit (429) retry backoff is 1s / 2s — far too short
-  SYMPTOM  : Large PDFs with 20 chunks → 80+ LLM calls. After ~30, Groq returns
-             429. Old retry waited 2^0=1s then 2^1=2s — both still within the
-             60-second window → all retries fail → chunk skipped → 0 questions
-             → HTTP 500.
-  FIX      : 429 errors now wait RATE_LIMIT_WAIT_S=65s (slightly over the
-             60s window). Other errors use [5, 15, 30]s backoff. MAX_RETRIES
-             increased to 3.
+BUG 1 — asyncio.to_thread() has no per-call timeout
+  asyncio.to_thread() parks the Groq SDK call on a thread-pool thread.
+  If Groq stalls (TCP open, no bytes), the thread hangs forever.
+  FIX: wrap every call with asyncio.wait_for(timeout=90s).
 
-BUG 3 — topic parameter was not threaded through the generation pipeline
-  FIX      : Added `topic: Optional[str]` through generate_quiz_from_text →
-             _generate_single → _call_llm → build_prompt.
+BUG 2 — Sequential batch loop blocks on any single hung call
+  _run_in_batches() ran batch-0 → await gather → then batch-1 → ...
+  One hung call in batch-1 meant batch-2 NEVER started → stuck at 88%.
+  FIX: submit ALL chunk tasks to one asyncio.gather(). Semaphore controls
+  concurrency. A hung call holds one slot; all others keep progressing.
+
+BUG 3 — Multi-type concurrency explosion (MCQ+TF+FIB = 12 concurrent calls)
+  Each type had its own MAX_PARALLEL=4 inner loop, so 3 types × 4 = 12
+  simultaneous Groq calls → guaranteed 429s and TCP stalls.
+  FIX: one global asyncio.Semaphore(4) shared across ALL types and chunks.
+
+BUG 4 — Wrong retry backoff: 2^0=1s, 2^1=2s (both inside Groq's 60s window)
+  FIX: BACKOFF_SCHEDULE = [5, 30, 65]. Semaphore released BEFORE sleep.
 """
 
 import json
@@ -39,24 +37,37 @@ from core.chunker import chunk_text_list
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LLM Configuration
+# Configuration
 # ─────────────────────────────────────────────────────────────────────────────
-MODEL_NAME        = "llama-3.3-70b-versatile"
-MAX_PARALLEL      = 4       # concurrent Groq calls per batch
-MAX_RETRIES       = 3       # FIX BUG 2: was 2
-RATE_LIMIT_WAIT_S = 65      # FIX BUG 2: wait on 429 (>60s rate-limit window)
-OTHER_ERROR_WAIT  = [5, 15, 30]   # seconds for attempt 0, 1, 2 on non-429 errors
-MAX_CHUNK_CHARS   = 6000    # hard cap per chunk sent to LLM (~1500 tokens)
+MODEL_NAME         = "llama-3.3-70b-versatile"
+MAX_PARALLEL       = 4            # max TOTAL concurrent Groq calls (all types combined)
+MAX_RETRIES        = 3
+LLM_CALL_TIMEOUT_S = 90           # FIX BUG 1: hard per-call timeout
+BACKOFF_SCHEDULE   = [5, 30, 65]  # FIX BUG 4: retry waits in seconds
+MAX_CHUNK_CHARS    = 6000
 
 client = Groq(api_key=GROQ_API_KEY)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Global semaphore — FIX BUG 2 + BUG 3
+# Shared across ALL chunk tasks and ALL question types.
+# Lazily initialised so it binds to the running event loop correctly.
+# ─────────────────────────────────────────────────────────────────────────────
+_llm_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    global _llm_semaphore
+    if _llm_semaphore is None:
+        _llm_semaphore = asyncio.Semaphore(MAX_PARALLEL)
+    return _llm_semaphore
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Chunking (delegated to core/chunker.py)
+# Chunking helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 def split_into_chunks(text: str) -> List[str]:
-    """Public interface used by quiz.py for chunk_count reporting."""
     return chunk_text_list(text)
 
 
@@ -67,7 +78,7 @@ def distribute_questions(total: int, num_chunks: int) -> List[int]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Prompt builder (now topic-aware — FIX BUG 3)
+# Prompt builder
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_prompt(
@@ -77,53 +88,38 @@ def build_prompt(
     difficulty: str,
     topic: Optional[str] = None,
 ) -> str:
-    level = {"Easy": "BASIC recall", "Medium": "COMPREHENSION", "Hard": "ANALYSIS"}.get(difficulty, "COMPREHENSION")
-    ctx   = context[:MAX_CHUNK_CHARS]
-
-    topic_instruction = (
-        f"IMPORTANT: Focus exclusively on the topic '{topic}'. "
-        f"Only generate questions directly about this topic.\n\n"
-        if topic else ""
-    )
+    level = {
+        "Easy":   "BASIC recall",
+        "Medium": "COMPREHENSION",
+        "Hard":   "ANALYSIS",
+    }.get(difficulty, "COMPREHENSION")
+    ctx        = context[:MAX_CHUNK_CHARS]
+    topic_line = f"IMPORTANT: Focus exclusively on the topic '{topic}' only.\n\n" if topic else ""
 
     if q_type == "TF":
-        return f"""{topic_instruction}Generate {num_questions} True/False questions at {level} level.
-
-Return ONLY a valid JSON array. No markdown, no explanation.
-Each object MUST have: question, options (always ["A) True", "B) False"]), correct ("A" or "B"), topic, difficulty, type.
-
-[{{"question":"...","options":["A) True","B) False"],"correct":"A","topic":"topic","difficulty":"{difficulty}","type":"TF"}}]
-
-Context:
-{ctx}
-"""
+        return (
+            f"{topic_line}Generate {num_questions} True/False questions at {level} level.\n"
+            "Return ONLY a valid JSON array. No markdown, no explanation.\n"
+            'Each object: question, options (["A) True","B) False"]), correct ("A" or "B"), topic, difficulty, type.\n\n'
+            f"Context:\n{ctx}"
+        )
     if q_type == "FIB":
-        return f"""{topic_instruction}Generate {num_questions} fill-in-the-blank MCQ questions at {level} level. Use ___ for the blank.
-
-Return ONLY a valid JSON array. No markdown, no explanation.
-Each object MUST have: question (with ___), options (4 choices A-D, A is correct), correct ("A"), topic, difficulty, type.
-
-[{{"question":"The ___ is responsible for ATP.","options":["A) mitochondria","B) nucleus","C) ribosome","D) vacuole"],"correct":"A","topic":"topic","difficulty":"{difficulty}","type":"FIB"}}]
-
-Context:
-{ctx}
-"""
-    return f"""{topic_instruction}Generate {num_questions} MCQ questions at {level} level.
-
-CRITICAL RULES:
-- Return ONLY a valid JSON array. No markdown, no explanation.
-- Each option MUST be a short label (max 60 characters).
-- Every option string must start with: A), B), C), D)
-
-[{{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"correct":"A","topic":"topic","difficulty":"{difficulty}","type":"MCQ"}}]
-
-Context:
-{ctx}
-"""
+        return (
+            f"{topic_line}Generate {num_questions} fill-in-the-blank MCQ questions at {level} level. Use ___ for the blank.\n"
+            "Return ONLY a valid JSON array. No markdown, no explanation.\n"
+            'Each object: question (with ___), options (4 A-D, A is correct), correct ("A"), topic, difficulty, type.\n\n'
+            f"Context:\n{ctx}"
+        )
+    # Default MCQ
+    return (
+        f"{topic_line}Generate {num_questions} MCQ questions at {level} level.\n"
+        "Return ONLY a valid JSON array. No markdown. Each option max 60 chars. Prefix every option: A), B), C), D).\n\n"
+        f"Context:\n{ctx}"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# JSON extraction (robust bracket-counting)
+# JSON extraction (robust bracket-counting + partial recovery)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def extract_json(text: str) -> List[dict]:
@@ -144,30 +140,29 @@ def extract_json(text: str) -> List[dict]:
 
     depth, end = 0, -1
     for i in range(start, len(text)):
-        c = text[i]
-        if c == "[":    depth += 1
-        elif c == "]":
+        if text[i] == "[":
+            depth += 1
+        elif text[i] == "]":
             depth -= 1
             if depth == 0:
                 end = i + 1
                 break
 
     if end == -1:
-        end_idx = text.rfind("]")
-        end = end_idx + 1 if end_idx != -1 else -1
-
+        idx = text.rfind("]")
+        end = idx + 1 if idx != -1 else -1
     if end == -1:
         return []
 
     candidate = text[start:end]
     try:
-        result = json.loads(candidate)
-        if isinstance(result, list):
-            return result
+        r = json.loads(candidate)
+        if isinstance(r, list):
+            return r
     except Exception:
         pass
 
-    # Partial object recovery (truncated responses)
+    # Partial object recovery for truncated responses
     partial, depth, obj_start = [], 0, -1
     for i, ch in enumerate(candidate):
         if ch == "{":
@@ -178,7 +173,7 @@ def extract_json(text: str) -> List[dict]:
             depth -= 1
             if depth == 0 and obj_start != -1:
                 try:
-                    obj = json.loads(candidate[obj_start: i + 1])
+                    obj = json.loads(candidate[obj_start:i + 1])
                     if isinstance(obj, dict):
                         partial.append(obj)
                 except Exception:
@@ -188,7 +183,7 @@ def extract_json(text: str) -> List[dict]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Option / correct normalisation
+# Normalisation helpers
 # ─────────────────────────────────────────────────────────────────────────────
 LABELS = ["A", "B", "C", "D", "E", "F"]
 
@@ -196,27 +191,16 @@ LABELS = ["A", "B", "C", "D", "E", "F"]
 def _normalize_options(options: list) -> list:
     if not options:
         return options
-    first     = str(options[0]).strip()
+    first      = str(options[0]).strip()
     has_prefix = len(first) > 1 and first[0].upper() in LABELS and first[1] in (")", ".", " ", ":")
-
-    if has_prefix:
-        normalised = []
-        for i, opt in enumerate(options):
-            s     = str(opt).strip()
-            label = LABELS[i] if i < len(LABELS) else str(i + 1)
-            text  = re.sub(r"^[A-Fa-f\d][).\s:]\s*", "", s).strip()
-            if len(text) > 80:
-                text = text[:77] + "..."
-            normalised.append(f"{label}) {text}")
-        return normalised
-    else:
-        result = []
-        for i in range(min(len(options), len(LABELS))):
-            text = str(options[i]).strip()
-            if len(text) > 80:
-                text = text[:77] + "..."
-            result.append(f"{LABELS[i]}) {text}")
-        return result
+    result     = []
+    for i, opt in enumerate(options[:len(LABELS)]):
+        s    = str(opt).strip()
+        text = re.sub(r"^[A-Fa-f\d][).\s:]\s*", "", s).strip() if has_prefix else s
+        if len(text) > 80:
+            text = text[:77] + "..."
+        result.append(f"{LABELS[i]}) {text}")
+    return result
 
 
 def _normalize_correct(correct) -> str:
@@ -233,33 +217,28 @@ def _normalize_correct(correct) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Rate-limit detection helpers (FIX BUG 2)
+# Rate-limit detection
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _is_rate_limit_error(exc: Exception) -> bool:
-    """Return True if exc is a Groq 429 RateLimitError."""
+def _is_rate_limit(exc: Exception) -> bool:
     if "RateLimit" in type(exc).__name__:
         return True
     status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
-    if status == 429:
-        return True
-    return "429" in str(exc) or "rate limit" in str(exc).lower()
+    return status == 429 or "429" in str(exc) or "rate limit" in str(exc).lower()
 
 
-def _get_retry_after(exc: Exception) -> Optional[int]:
-    """Extract retry-after seconds from Groq exception headers, if present."""
+def _retry_after(exc: Exception) -> Optional[int]:
     headers = getattr(getattr(exc, "response", None), "headers", {})
-    retry_after = headers.get("retry-after") if headers else None
-    if retry_after:
-        try:
-            return int(retry_after)
-        except (ValueError, TypeError):
-            pass
-    return None
+    val     = (headers or {}).get("retry-after")
+    try:
+        return int(val) if val else None
+    except (ValueError, TypeError):
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Single chunk → LLM call (with smarter retry + backoff)
+# Core: single chunk → LLM call
+# Fixes: BUG 1 (per-call timeout), BUG 2+3 (semaphore), BUG 4 (backoff)
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _call_llm(
@@ -269,121 +248,154 @@ async def _call_llm(
     difficulty: str,
     chunk_idx: int,
     topic: Optional[str] = None,
-    retries: int = MAX_RETRIES,
 ) -> List[dict]:
     """
-    Send one chunk to Groq. Retries up to `retries` times.
-
-    FIX BUG 2: rate-limit errors now wait RATE_LIMIT_WAIT_S (65s) so the
-    retry lands after Groq's 60-second window resets. Other errors use a
-    short [5, 15, 30]s backoff. Returns empty list on exhaustion — never raises.
+    Send one chunk to Groq. Guarantees:
+      - Never hangs > LLM_CALL_TIMEOUT_S (90s) per attempt            [BUG 1]
+      - Semaphore acquired only during the call, released before sleep [BUG 2+3]
+      - Correct backoff schedule [5, 30, 65]s                          [BUG 4]
+      - Always returns [] on exhaustion — NEVER raises
     """
-    prompt = build_prompt(chunk_text, num_questions, q_type, difficulty, topic=topic)
+    prompt    = build_prompt(chunk_text, num_questions, q_type, difficulty, topic)
+    semaphore = _get_semaphore()
 
-    for attempt in range(retries + 1):
-        try:
-            logger.info(
-                f"[Chunk {chunk_idx}] Generating {num_questions} {q_type} questions "
-                f"(attempt {attempt + 1}/{retries + 1})"
-            )
-            response = await asyncio.to_thread(
-                client.chat.completions.create,
-                model=MODEL_NAME,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are an expert quiz generator. Always respond with ONLY a valid JSON array. "
-                            "Never include markdown, explanations, or text outside the JSON array. "
-                            "The response must start with '[' and end with ']'. "
-                            "Keep each answer option under 60 characters."
-                        )
-                    },
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.4,
-                max_tokens=4096,
-            )
+    for attempt in range(MAX_RETRIES + 1):
+        last_exc: Optional[Exception] = None
+        is_rl = False
 
-            content   = response.choices[0].message.content
-            questions = extract_json(content)
-
-            valid = []
-            for q in questions:
-                if isinstance(q, dict) and q.get("question") and q.get("options") and q.get("correct"):
-                    if not q.get("type"):
-                        q["type"] = q_type
-                    q["options"] = _normalize_options(q["options"])
-                    q["correct"] = _normalize_correct(q["correct"])
-                    valid.append(q)
-
-            logger.info(f"[Chunk {chunk_idx}] Got {len(valid)} valid questions")
-            return valid
-
-        except Exception as e:
-            if attempt >= retries:
-                logger.error(
-                    f"[Chunk {chunk_idx}] Failed after {retries + 1} attempts — skipping: {e}"
+        # ── Semaphore held ONLY during the Groq call, not during sleep ────────
+        async with semaphore:
+            try:
+                logger.info(
+                    f"[Chunk {chunk_idx}][{q_type}] attempt {attempt + 1}/{MAX_RETRIES + 1} "
+                    f"— {num_questions} q"
                 )
-                return []
 
-            # ── FIX BUG 2: smart backoff based on error type ──────────────────
-            if _is_rate_limit_error(e):
-                wait = _get_retry_after(e) or RATE_LIMIT_WAIT_S
+                # FIX BUG 1: asyncio.wait_for gives the call a hard deadline.
+                # On TimeoutError the `async with semaphore` block exits,
+                # releasing the slot immediately so other chunks can proceed.
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        client.chat.completions.create,
+                        model=MODEL_NAME,
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are an expert quiz generator. "
+                                    "Always respond with ONLY a valid JSON array starting with '[' and ending with ']'. "
+                                    "No markdown. No explanation. No text outside the array. "
+                                    "Keep each answer option under 60 characters."
+                                ),
+                            },
+                            {"role": "user", "content": prompt},
+                        ],
+                        temperature=0.4,
+                        max_tokens=4096,
+                    ),
+                    timeout=LLM_CALL_TIMEOUT_S,
+                )
+
+                content   = response.choices[0].message.content
+                questions = extract_json(content)
+
+                valid = []
+                for q in questions:
+                    if isinstance(q, dict) and q.get("question") and q.get("options") and q.get("correct"):
+                        if not q.get("type"):
+                            q["type"] = q_type
+                        q["options"] = _normalize_options(q["options"])
+                        q["correct"] = _normalize_correct(q["correct"])
+                        valid.append(q)
+
+                logger.info(f"[Chunk {chunk_idx}][{q_type}] ✓ {len(valid)} questions")
+                return valid
+
+            except asyncio.TimeoutError:
                 logger.warning(
-                    f"[Chunk {chunk_idx}] Groq 429 rate-limited. "
-                    f"Waiting {wait}s before retry {attempt + 2}/{retries + 1}…"
+                    f"[Chunk {chunk_idx}][{q_type}] ⏱ timed out after {LLM_CALL_TIMEOUT_S}s "
+                    f"(attempt {attempt + 1}) — slot released"
                 )
-                await asyncio.sleep(wait)
-            else:
-                wait = OTHER_ERROR_WAIT[min(attempt, len(OTHER_ERROR_WAIT) - 1)]
+                last_exc = asyncio.TimeoutError()
+                is_rl    = False
+
+            except Exception as e:
                 logger.warning(
-                    f"[Chunk {chunk_idx}] Error (attempt {attempt + 1}): {e}. "
-                    f"Retrying in {wait}s…"
+                    f"[Chunk {chunk_idx}][{q_type}] ✗ {type(e).__name__} "
+                    f"(attempt {attempt + 1}): {e}"
                 )
-                await asyncio.sleep(wait)
+                last_exc = e
+                is_rl    = _is_rate_limit(e)
+
+        # ── Semaphore released — sleep OUTSIDE so other chunks can run ─────────
+        if attempt >= MAX_RETRIES:
+            logger.error(f"[Chunk {chunk_idx}][{q_type}] ✗✗ SKIPPED after {MAX_RETRIES + 1} attempts")
+            return []
+
+        wait = (
+            (_retry_after(last_exc) or BACKOFF_SCHEDULE[min(attempt, len(BACKOFF_SCHEDULE) - 1)])
+            if is_rl
+            else BACKOFF_SCHEDULE[min(attempt, len(BACKOFF_SCHEDULE) - 1)]
+        )
+        logger.warning(f"[Chunk {chunk_idx}][{q_type}] retrying in {wait}s…")
+        await asyncio.sleep(wait)
 
     return []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Batched parallel execution
+# Fully parallel gather — FIX BUG 2 (replaces sequential batch loop)
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _run_in_batches(
-    tasks_args: list,
+async def _run_all_chunks(
+    chunks: List[str],
+    q_per_chunk: List[int],
     q_type: str,
     difficulty: str,
-    topic: Optional[str] = None,
+    topic: Optional[str],
 ) -> List[dict]:
+    """
+    Submit ALL chunk tasks simultaneously. The semaphore inside _call_llm()
+    limits concurrency to MAX_PARALLEL. Unlike the old sequential batch loop,
+    a hung call in 'batch 1' no longer blocks 'batch 2' from starting —
+    other tasks simply wait for a semaphore slot and run as soon as one frees.
+
+    asyncio.gather(return_exceptions=True) ALWAYS resolves. Combined with
+    the 90s per-call timeout, the pipeline is guaranteed to complete.
+    """
+    tasks = [
+        _call_llm(chunk, q_count, q_type, difficulty, i, topic)
+        for i, (chunk, q_count) in enumerate(zip(chunks, q_per_chunk))
+        if q_count > 0
+    ]
+
+    logger.info(f"[Pipeline][{q_type}] {len(tasks)} tasks → semaphore cap={MAX_PARALLEL}")
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
     all_questions: List[dict] = []
+    completed = failed = skipped = 0
 
-    for batch_start in range(0, len(tasks_args), MAX_PARALLEL):
-        batch = tasks_args[batch_start: batch_start + MAX_PARALLEL]
-        logger.info(
-            f"[Batch] Processing chunks {batch_start}–{batch_start + len(batch) - 1} "
-            f"of {len(tasks_args)}"
-        )
-
-        tasks = [
-            _call_llm(chunk_text, num_q, q_type, difficulty, chunk_idx, topic=topic)
-            for chunk_text, num_q, chunk_idx in batch
-        ]
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for i, result in enumerate(results):
-            chunk_idx = batch[i][2]
-            if isinstance(result, Exception):
-                logger.error(f"[Chunk {chunk_idx}] Unexpected exception in gather: {result}")
-            elif isinstance(result, list):
+    for i, result in enumerate(results):
+        if isinstance(result, BaseException):
+            logger.error(f"[Chunk {i}][{q_type}] escaped gather: {result}")
+            failed += 1
+        elif isinstance(result, list):
+            if result:
                 all_questions.extend(result)
+                completed += 1
+            else:
+                skipped += 1
 
+    logger.info(
+        f"[Pipeline][{q_type}] done — "
+        f"completed={completed} skipped={skipped} failed={failed} "
+        f"questions={len(all_questions)}"
+    )
     return all_questions
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Core public API — parallel chunked generation
+# Public API
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _generate_single(
@@ -393,38 +405,23 @@ async def _generate_single(
     difficulty: str,
     topic: Optional[str] = None,
 ) -> List[dict]:
-    """
-    FIX BUG 1: chunk_text_list is synchronous CPU work. Moved to thread pool.
-    FIX BUG 3: topic threaded through to _call_llm and build_prompt.
-    """
-    # FIX BUG 1: was `chunks = chunk_text_list(text)` — synchronous, blocked event loop
+    # Chunking is CPU-bound — keep off the event loop
     chunks = await asyncio.to_thread(chunk_text_list, text)
 
     logger.info(
-        f"\n====== PARALLEL GENERATION: {num_questions} {q_type} ({difficulty}) "
-        f"| {len(chunks)} chunk(s) | topic={topic or 'all'} ======"
+        f"\n====== START {q_type}: {num_questions} q | "
+        f"{len(chunks)} chunks | topic={topic or 'all'} ======"
     )
 
     if not chunks:
-        logger.warning("No chunks produced — text may be empty or too short")
         return []
-
     if len(chunks) == 1:
-        return await _call_llm(
-            chunks[0], num_questions, q_type, difficulty, chunk_idx=0, topic=topic
-        )
+        return await _call_llm(chunks[0], num_questions, q_type, difficulty, 0, topic)
 
-    q_per_chunk = distribute_questions(num_questions, len(chunks))
+    q_per_chunk   = distribute_questions(num_questions, len(chunks))
+    all_questions = await _run_all_chunks(chunks, q_per_chunk, q_type, difficulty, topic)
 
-    tasks_args = [
-        (chunk, q_count, i)
-        for i, (chunk, q_count) in enumerate(zip(chunks, q_per_chunk))
-        if q_count > 0
-    ]
-
-    all_questions = await _run_in_batches(tasks_args, q_type, difficulty, topic=topic)
-
-    seen: set = set()
+    seen:    set        = set()
     deduped: List[dict] = []
     for q in all_questions:
         key = q["question"].strip().lower()
@@ -432,13 +429,9 @@ async def _generate_single(
             seen.add(key)
             deduped.append(q)
 
-    logger.info(f"====== DONE: {len(deduped)} unique questions from {len(chunks)} chunks ======\n")
+    logger.info(f"====== END {q_type}: {len(deduped)} unique questions ======\n")
     return deduped
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Multi-type wrapper
-# ─────────────────────────────────────────────────────────────────────────────
 
 async def generate_quiz_from_text(
     text: str,
@@ -448,21 +441,19 @@ async def generate_quiz_from_text(
     topic: Optional[str] = None,
 ) -> List[dict]:
     """
-    Public entry point. Supports comma-separated q_type like 'MCQ,TF,FIB'.
-    FIX BUG 3: topic param now flows all the way to the LLM prompt.
+    Public entry point. Comma-separated q_type ('MCQ,TF,FIB') supported.
+    All types share _llm_semaphore → total concurrent calls always ≤ MAX_PARALLEL.
     """
     types = [t.strip().upper() for t in q_type.split(",") if t.strip()]
     if len(types) <= 1:
-        return await _generate_single(
-            text, num_questions, q_type.upper(), difficulty, topic=topic
-        )
+        return await _generate_single(text, num_questions, q_type.upper(), difficulty, topic)
 
     base   = num_questions // len(types)
     extras = num_questions % len(types)
     counts = [base + (1 if i < extras else 0) for i in range(len(types))]
 
     type_tasks = [
-        _generate_single(text, count, t, difficulty, topic=topic)
+        _generate_single(text, count, t, difficulty, topic)
         for t, count in zip(types, counts)
         if count > 0
     ]
@@ -471,8 +462,8 @@ async def generate_quiz_from_text(
 
     all_questions: List[dict] = []
     for i, result in enumerate(type_results):
-        if isinstance(result, Exception):
-            logger.error(f"[Type {types[i]}] Failed: {result}")
+        if isinstance(result, BaseException):
+            logger.error(f"[Type {types[i]}] pipeline failed: {result}")
         else:
             all_questions.extend(result)
 
