@@ -1,13 +1,4 @@
-/**
- * GeneratePage.js (v4 — deadlock-free progress)
- * ================================================
- * FIXES:
- *  1. Progress bar freezes at 88% — phase 3 now creeps 35→95% over 350s
- *     (matches backend timeout). Bar is always moving. Only success sets 100%.
- *  2. Timer leaks on retry/unmount — all IDs tracked in timerRefs Set.
- *  3. res.data crash when analyze fails — result guarded with if (analyzeData).
- *  4. Upload uses generateQuiz() from quizService (correct auth token key).
- */
+
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { generateQuiz, analyzePDF } from "../services/quizService";
@@ -52,12 +43,12 @@ export default function GeneratePage() {
     const [uploadPct,     setUploadPct]     = useState(0);
     const [progress,      setProgress]      = useState(0);
     const [genPhase,      setGenPhase]      = useState(0);
+    const [genPhaseLabel, setGenPhaseLabel] = useState("");   // NEW: real chunk progress text
     const [error,         setError]         = useState("");
     const [generated,     setGenerated]     = useState(null);
     const [detailedExp,   setDetailedExp]   = useState(saved?.detailedExp ?? true);
     const [toast,         setToast]         = useState("");
 
-    // FIX 2: track every timer id — nothing leaks across retries or unmount
     const timerRefs = useRef(new Set());
     const clearAllTimers = useCallback(() => {
         timerRefs.current.forEach(id => { clearInterval(id); clearTimeout(id); });
@@ -86,7 +77,6 @@ export default function GeneratePage() {
         const baseMeta = { name: selectedFile.name, size: selectedFile.size };
         try {
             if (!isGuest) {
-                // FIX 3: only destructure if the call actually succeeded
                 let analyzeData = null;
                 try { analyzeData = await analyzePDF(selectedFile); }
                 catch (e) { console.warn("[Generate] Analyze (non-fatal):", e.message); }
@@ -108,7 +98,6 @@ export default function GeneratePage() {
                 } else { savePdfMeta(baseMeta); setPdfMeta(baseMeta); }
             } else { savePdfMeta(baseMeta); setPdfMeta(baseMeta); }
         } catch (e) {
-            console.warn("handleFileSelect unexpected:", e.message);
             savePdfMeta(baseMeta); setPdfMeta(baseMeta);
         } finally { setExtracting(false); }
     }, [isGuest]);
@@ -127,18 +116,12 @@ export default function GeneratePage() {
         if (!file)   { setError("Please select a PDF file first."); return; }
         if (isGuest) { setError("Guest mode: please sign up to use AI generation."); return; }
 
-        setError(""); setLoading(true); setProgress(5); setGenPhase(1); setUploadPct(0);
-        clearAllTimers();   // clear timers from any previous run
+        setError(""); setLoading(true); setProgress(5); setGenPhase(1);
+        setUploadPct(0); setGenPhaseLabel("");
+        clearAllTimers();
 
-        // ── FIX 1: Two-stage progress system ─────────────────────────────────
-        // Stage 1 — parse (5→20%) + chunk (20→35%) in ~1.5 seconds
-        // Stage 2 — AI phase creeps 35→95% over 350s (matches backend timeout).
-        //   Deliberately never reaches 100 via timer.
-        //   Only success handler sets 100. Always visibly moving, never frozen.
-        const MAX_WAIT_MS = 350_000;
-        const AI_FROM = 35, AI_TO = 95;
-        const AI_STEP_MS = Math.floor(MAX_WAIT_MS / (AI_TO - AI_FROM)); // ~5833ms / 1%
-
+        // ── Phase 1 + 2: fast phases (parse + chunk) — still timer-based ────
+        // These complete in <2 seconds on the backend. We animate them locally.
         const runFastPhase = (from, to, phase, durationMs) => {
             setGenPhase(phase);
             const steps = Math.ceil((to - from) / 3);
@@ -152,34 +135,35 @@ export default function GeneratePage() {
             timerRefs.current.add(id);
         };
 
-        const startAIPhase = () => {
-            setGenPhase(3);
-            let current = AI_FROM;
-            const id = setInterval(() => {
-                current = Math.min(current + 1, AI_TO);
-                setProgress(current);
-                // intentionally no clearInterval here — stays alive until clearAllTimers()
-            }, AI_STEP_MS);
-            timerRefs.current.add(id);
-        };
-
         runFastPhase(5, 20, 1, 800);
-        const t1 = setTimeout(() => runFastPhase(20, 35, 2, 600),  900);
-        const t2 = setTimeout(() => startAIPhase(),               1600);
+        const t1 = setTimeout(() => runFastPhase(20, 35, 2, 600), 900);
+        const t2 = setTimeout(() => {
+            setGenPhase(3);
+            setGenPhaseLabel("Waiting for first chunk…");
+        }, 1600);
         timerRefs.current.add(t1); timerRefs.current.add(t2);
 
+        // ── onChunk: called by quizService for each SSE chunk event ──────────
+        // This is the key change from v4. Progress is now driven by real data.
+        // Formula: 35% (after phases 1+2) + (done/of) * 55% = 35–90%
+        // The final 10% (90→100%) is set in the success handler.
+        const onChunk = ({ done, of, count, q_type }) => {
+            const realProgress = Math.round(35 + (done / of) * 55);
+            setProgress(Math.min(realProgress, 90));
+            setGenPhaseLabel(`Chunk ${done}/${of} complete — ${count} ${q_type} questions`);
+        };
+
         try {
-            // FIX 4: generateQuiz from quizService uses apiClient with correct
-            // "qf_access_token" key + 360s timeout + upload progress callback
             const data = await generateQuiz({
                 file, numQuestions, qType: qTypes.join(","), difficulty,
                 topic: selectedTopic || undefined,
                 onUploadProgress: ({ loaded, total }) => {
                     if (total) setUploadPct(Math.round((loaded / total) * 100));
                 },
+                onChunk,   // NEW: real SSE progress callback
             });
 
-            clearAllTimers(); setProgress(100); setGenPhase(4);
+            clearAllTimers(); setProgress(100); setGenPhase(4); setGenPhaseLabel("");
 
             const questions     = data.questions || [];
             const quizSessionId = data.quiz_session_id;
@@ -193,7 +177,7 @@ export default function GeneratePage() {
         } catch (e) {
             clearAllTimers();
             const status = e.response?.status;
-            if (status === 401) return; // interceptor already handled
+            if (status === 401) return;
             const userMsg = e.userMessage;
             const detail  = e.response?.data?.detail;
             setError(
@@ -204,11 +188,11 @@ export default function GeneratePage() {
                 status === 429 ? "AI rate limit reached. Please wait 30 seconds and retry." :
                 status === 503 ? "AI service temporarily unavailable. Please retry in a moment." :
                 status === 504 ? "Generation timed out. Try fewer questions or a smaller PDF." :
-                                 "Generation failed. Try fewer questions or re-upload the PDF."
+                                 "Generation failed. Please try again."
             );
         } finally {
             setUploadPct(0);
-            timerRefs.current.add(setTimeout(() => { setLoading(false); setProgress(0); setGenPhase(0); }, 600));
+            timerRefs.current.add(setTimeout(() => { setLoading(false); setProgress(0); setGenPhase(0); setGenPhaseLabel(""); }, 600));
         }
     };
 
@@ -244,7 +228,7 @@ export default function GeneratePage() {
                         <div style={{ width: "52px", height: "52px", borderRadius: "50%", background: "var(--navy-muted)", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto .875rem", fontSize: "1.5rem" }}>📤</div>
                         <div style={{ fontWeight: 700, fontSize: "1.1rem", color: "var(--navy)", marginBottom: ".5rem" }}>Upload your PDF</div>
                         <p style={{ fontSize: ".85rem", color: "var(--text-muted)", maxWidth: "320px", margin: "0 auto .875rem", lineHeight: 1.65 }}>
-                            Drag and drop your study material here, or click to browse files. Supports PDF documents up to 20MB.
+                            Drag and drop your study material here, or click to browse. Supports PDFs up to 25MB.
                         </p>
                         <button className="btn btn-primary" style={{ margin: "0 auto", pointerEvents: "none" }}>📎 Select Document</button>
                     </div>
@@ -275,8 +259,8 @@ export default function GeneratePage() {
                                     {extracting && <span style={{ fontSize: ".68rem", fontWeight: 600, color: "var(--accent)" }}>Analysing…</span>}
                                 </div>
                                 {!file && pdfMeta && (
-                                    <div style={{ marginTop: ".4rem", fontSize: ".7rem", color: "var(--warning)", fontWeight: 600, display: "flex", alignItems: "center", gap: ".3rem", flexWrap: "wrap" }}>
-                                        ⚠️ PDF not loaded — click <span style={{ color: "var(--navy)", cursor: "pointer", textDecoration: "underline" }} onClick={() => fileInputRef.current?.click()}>Upload again</span> to generate, or Change to pick a different file.
+                                    <div style={{ marginTop: ".4rem", fontSize: ".7rem", color: "var(--warning)", fontWeight: 600 }}>
+                                        ⚠️ PDF not loaded — <span style={{ cursor: "pointer", textDecoration: "underline" }} onClick={() => fileInputRef.current?.click()}>Upload again</span> or Change.
                                     </div>
                                 )}
                             </div>
@@ -295,7 +279,7 @@ export default function GeneratePage() {
                             <div className="doc-stat-cell"><div className="doc-stat-label">Word Count</div><div className="doc-stat-value">{wordCount?.toLocaleString()}</div></div>
                             <div className="doc-stat-cell"><div className="doc-stat-label">Characters</div><div className="doc-stat-value">{charCount?.toLocaleString() ?? "—"}</div></div>
                             <div className="doc-stat-cell"><div className="doc-stat-label">File Size</div><div className="doc-stat-value">{(file.size / 1024 / 1024).toFixed(1)} MB</div></div>
-                            <div className="doc-stat-cell"><div className="doc-stat-label">Available Questions</div><div className="doc-stat-value">{maxQ} Max</div></div>
+                            <div className="doc-stat-cell"><div className="doc-stat-label">Max Questions</div><div className="doc-stat-value">{maxQ}</div></div>
                         </div>
                         {topics.length > 0 && (
                             <div style={{ marginBottom: "1.5rem" }}>
@@ -323,7 +307,7 @@ export default function GeneratePage() {
                         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: "1.25rem" }}>
                             <div>
                                 <div style={{ fontWeight: 700, fontSize: "1rem", color: "var(--navy)", marginBottom: ".25rem" }}>Question Configuration</div>
-                                <div style={{ fontSize: ".8rem", color: "var(--text-muted)" }}>Select how many practice questions you want to generate.</div>
+                                <div style={{ fontSize: ".8rem", color: "var(--text-muted)" }}>How many questions to generate.</div>
                             </div>
                             <div style={{ display: "flex", alignItems: "baseline", gap: ".3rem", background: "var(--navy)", color: "#fff", padding: ".4rem .875rem", borderRadius: "8px" }}>
                                 <span style={{ fontSize: "1.375rem", fontWeight: 800 }}>{numQuestions}</span>
@@ -334,9 +318,9 @@ export default function GeneratePage() {
                             onChange={(e) => setNumQuestions(+e.target.value)}
                             style={{ width: "100%", marginBottom: ".5rem", accentColor: "var(--navy)" }} />
                         <div style={{ display: "flex", justifyContent: "space-between", fontSize: ".65rem", color: "var(--text-light)", fontWeight: 600, marginBottom: "1.25rem" }}>
-                            <span>5 QUESTIONS</span>
+                            <span>5</span>
                             {[15, 25, 35, 45].filter(t => t < maxQ).map(t => <span key={t}>{t}</span>)}
-                            <span>{maxQ} QUESTIONS</span>
+                            <span>{maxQ}</span>
                         </div>
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: ".875rem" }}>
                             {Q_TYPES.map(({ id, label, desc }) => (
@@ -376,7 +360,7 @@ export default function GeneratePage() {
                 {serverWaking && (
                     <div style={{ background: "rgba(251,191,36,.12)", border: "1px solid rgba(251,191,36,.4)", borderRadius: "10px", padding: ".75rem 1rem", marginBottom: "1rem", fontSize: ".82rem", color: "#92400E", display: "flex", alignItems: "center", gap: ".625rem" }}>
                         <span style={{ fontSize: "1.1rem", animation: "spin .8s linear infinite", display: "inline-block" }}>⚙</span>
-                        <div><strong>Server is waking up…</strong><div style={{ opacity: .8, marginTop: ".1rem" }}>Render free-tier servers sleep after inactivity. Your request will be retried automatically.</div></div>
+                        <div><strong>Server is waking up…</strong><div style={{ opacity: .8, marginTop: ".1rem" }}>Render free-tier servers sleep after inactivity. Your request will proceed automatically.</div></div>
                     </div>
                 )}
 
@@ -404,14 +388,15 @@ export default function GeneratePage() {
                                 <span style={{ animation: "spin .8s linear infinite", display: "inline-block", fontSize: "1rem" }}>⚙</span>
                                 {genPhase === 1 && "Parsing PDF content…"}
                                 {genPhase === 2 && "Splitting into chunks…"}
-                                {genPhase === 3 && "AI generating questions…"}
+                                {/* Phase 3: show real chunk progress label when available */}
+                                {genPhase === 3 && (genPhaseLabel || "AI generating questions…")}
                                 {genPhase === 4 && "Saving to your library…"}
                                 {genPhase === 0 && "Initialising…"}
                             </div>
                             <div className="gen-progress-pct">{progress}%</div>
                         </div>
                         <div className="gen-progress-track">
-                            <div className="gen-progress-fill" style={{ width: `${progress}%` }} />
+                            <div className="gen-progress-fill" style={{ width: `${progress}%`, transition: "width .4s ease" }} />
                         </div>
                         <div className="gen-steps">
                             {GEN_STEPS.map(step => {
@@ -425,7 +410,7 @@ export default function GeneratePage() {
                         </div>
                         <div className="gen-eta">
                             {genPhase <= 2 ? "Analysing document structure…"
-                                : genPhase === 3 ? `Generating ${numQuestions} questions — large PDFs can take 2–4 minutes`
+                                : genPhase === 3 ? "Progress updates as each chunk completes — large PDFs take 1–3 minutes"
                                 : "Almost done!"}
                         </div>
                     </div>
@@ -450,7 +435,7 @@ export default function GeneratePage() {
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "1rem" }}>
                             <div>
                                 <div style={{ fontWeight: 700, color: "var(--navy)", fontSize: "1rem" }}>✅ {generated.questions.length} Questions Generated</div>
-                                <div style={{ fontSize: ".8rem", color: "var(--text-muted)", marginTop: ".125rem" }}>Your questions are ready — head to Study Mode to begin!</div>
+                                <div style={{ fontSize: ".8rem", color: "var(--text-muted)", marginTop: ".125rem" }}>Ready — head to Study Mode to begin!</div>
                             </div>
                             <div className="badge badge-success">Ready</div>
                         </div>
