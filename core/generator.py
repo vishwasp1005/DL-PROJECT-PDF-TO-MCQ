@@ -1,66 +1,5 @@
 """
-core/generator.py — Speed-optimised, Deadlock-Free MCQ Generator (v5)
-=======================================================================
-
-BOTTLENECK ANALYSIS (10 MB PDF, 41 questions)
-──────────────────────────────────────────────
-The v4 generator was stable but slow because of three compounding issues:
-
-BOTTLENECK 1 — Too many API calls (20) each asking too few MCQs (2-3)
-  With TARGET_CHUNK_WORDS=1000 and MAX_TOTAL_CHUNKS=20, a 10MB PDF (~20,000
-  words) produced 20 chunks. 41 questions spread across 20 chunks = ~2 MCQs
-  per Groq call.
-
-  Every Groq call has fixed overhead:
-    HTTPS connection + queue entry: ~1.5s
-    Inference for 2 MCQs output:   ~2.4s  (240 output tokens @ ~100 tok/s)
-    Total per call:                 ~3.9s
-    Throughput:                     2/3.9 = 0.51 MCQ/s
-
-  For 20 calls at MAX_PARALLEL=4 (5 serial slots × ~8s avg):  ~40–80s
-
-  With chunker.py now producing MAX_TOTAL_CHUNKS=10 (2000-word chunks):
-    41 questions / 10 chunks = ~4-5 MCQs per call
-    Inference for 5 MCQs:    ~6s  (600 output tokens)
-    Total per call:           ~7.5s
-    Throughput:               5/7.5 = 0.67 MCQ/s  (+31% per call)
-    10 calls / MAX_PARALLEL=5 (2 serial slots × ~10s avg):  ~20s
-
-BOTTLENECK 2 — Undifferentiated retry backoff
-  v4 used BACKOFF_SCHEDULE=[5, 30, 65] for ALL error types.
-  A transient timeout (common on Groq free tier) triggered the same 30–65s
-  waits as a true rate-limit hit.
-
-  Example: 3 chunks in the last batch, one times out on attempt 1:
-    attempt 0: 90s timeout + wait 5s  → 95s (worse: the 90s timeout fired)
-    attempt 1: 90s timeout + wait 30s → 120s more
-    Total for that task: 215s on the critical path
-
-  FIX: Split into two independent schedules:
-    TIMEOUT_BACKOFF    = [3, 8]   — fast retry (connection glitch, usually gone)
-    RATE_LIMIT_BACKOFF = [62]     — must wait past Groq's 60s window (only 1 retry needed)
-    OTHER_BACKOFF      = [5, 15]  — network errors, 5xx
-
-BOTTLENECK 3 — LLM_CALL_TIMEOUT_S=90s too generous
-  When Groq TCP-stalls, the timeout fires after 90s. That's 90s of dead wait
-  on the critical path. For a 10-chunk job with MAX_PARALLEL=5, only 2 serial
-  slots exist. A single 90s timeout on any task makes that slot 90s long.
-
-  FIX: Reduce to 55s. Groq's p99 response time for 600-token outputs is well
-  under 30s. 55s gives plenty of headroom while cutting worst-case dead wait
-  from 90s to 55s.
-
-PERFORMANCE SUMMARY (10 MB PDF, 41 MCQs)
-  v4: ~80–120s  (20 chunks × 2 MCQs, 5 serial slots, 90s timeout)
-  v5: ~20–35s   (10 chunks × 4 MCQs, 2 serial slots, 55s timeout)
-  Speedup: 3–4×
-
-Stability guarantees from v4 are fully preserved:
-  ✅ Global asyncio.Semaphore — no concurrency explosion
-  ✅ asyncio.wait_for per call — no infinite hangs
-  ✅ asyncio.gather(return_exceptions=True) — always resolves
-  ✅ Semaphore released BEFORE sleep — other tasks proceed during backoff
-  ✅ Empty list returned on exhausted retries — pipeline always completes
+core/generator.py — SSE-Streaming MCQ Generator (v6)
 """
 
 import json
@@ -77,24 +16,20 @@ from core.chunker import chunk_text_list
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Configuration  (delta from v4 marked with ←)
+# Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 MODEL_NAME         = "llama-3.3-70b-versatile"
-MAX_PARALLEL       = 5            # ← was 4  (+1 worker, still safe at 25 RPM < 30 limit)
-MAX_RETRIES        = 2            # ← was 3  (fewer retries → faster failure path)
-LLM_CALL_TIMEOUT_S = 55           # ← was 90 (cuts dead-wait on TCP stall by 38%)
-MAX_CHUNK_CHARS    = 9000         # ← was 6000 (matches new 2000-word chunks)
+MAX_PARALLEL       = 5
+MAX_RETRIES        = 2
+LLM_CALL_TIMEOUT_S = 55
+MAX_CHUNK_CHARS    = 9000
 
-# ← Split backoff by error type (was one unified BACKOFF_SCHEDULE)
-TIMEOUT_BACKOFF     = [3, 8]      # transient timeout — retry fast
-RATE_LIMIT_BACKOFF  = [62]        # Groq 429 — must clear 60s window (one retry)
-OTHER_BACKOFF       = [5, 15]     # network / 5xx errors
+TIMEOUT_BACKOFF    = [3, 8]
+RATE_LIMIT_BACKOFF = [62]
+OTHER_BACKOFF      = [5, 15]
 
 client = Groq(api_key=GROQ_API_KEY)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Global semaphore — shared across all types and all chunks
-# ─────────────────────────────────────────────────────────────────────────────
 _llm_semaphore: Optional[asyncio.Semaphore] = None
 
 
@@ -120,7 +55,7 @@ def distribute_questions(total: int, num_chunks: int) -> List[int]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Prompt builder — tighter prompts, lower token usage
+# Prompt builder
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_prompt(
@@ -133,34 +68,23 @@ def build_prompt(
     level = {"Easy": "basic recall", "Medium": "comprehension", "Hard": "analysis"}.get(difficulty, "comprehension")
     ctx   = context[:MAX_CHUNK_CHARS]
     topic_line = f"Focus only on '{topic}'.\n" if topic else ""
-
-    # Compact single-line JSON schema comment keeps prompt short
     schema = '{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"correct":"A","topic":"...","difficulty":"' + difficulty + '","type":"' + q_type + '"}'
 
     if q_type == "TF":
         schema = '{"question":"...","options":["A) True","B) False"],"correct":"A","topic":"...","difficulty":"' + difficulty + '","type":"TF"}'
-        return (
-            f"{topic_line}Generate {num_questions} True/False questions at {level} level.\n"
-            f"Return ONLY a JSON array of objects matching: {schema}\n"
-            f"No markdown. No explanation.\n\nContext:\n{ctx}"
-        )
+        return (f"{topic_line}Generate {num_questions} True/False questions at {level} level.\n"
+                f"Return ONLY a JSON array of objects matching: {schema}\nNo markdown.\n\nContext:\n{ctx}")
     if q_type == "FIB":
         schema = '{"question":"The ___ ...","options":["A) correct","B) wrong","C) wrong","D) wrong"],"correct":"A","topic":"...","difficulty":"' + difficulty + '","type":"FIB"}'
-        return (
-            f"{topic_line}Generate {num_questions} fill-in-the-blank MCQ questions at {level} level. Use ___ for the blank.\n"
+        return (f"{topic_line}Generate {num_questions} fill-in-the-blank MCQ questions at {level} level. Use ___ for the blank.\n"
+                f"Return ONLY a JSON array of objects matching: {schema}\nNo markdown.\n\nContext:\n{ctx}")
+    return (f"{topic_line}Generate {num_questions} MCQ questions at {level} level.\n"
             f"Return ONLY a JSON array of objects matching: {schema}\n"
-            f"No markdown. No explanation.\n\nContext:\n{ctx}"
-        )
-    return (
-        f"{topic_line}Generate {num_questions} MCQ questions at {level} level.\n"
-        f"Return ONLY a JSON array of objects matching: {schema}\n"
-        f"Rules: options max 60 chars each. Start every option with A) B) C) D). No markdown.\n\n"
-        f"Context:\n{ctx}"
-    )
+            f"Options max 60 chars. Prefix: A) B) C) D). No markdown.\n\nContext:\n{ctx}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# JSON extraction (bracket-counting + partial recovery)
+# JSON extraction
 # ─────────────────────────────────────────────────────────────────────────────
 
 def extract_json(text: str) -> List[dict]:
@@ -168,17 +92,14 @@ def extract_json(text: str) -> List[dict]:
         return json.loads(text.strip())
     except Exception:
         pass
-
     text = re.sub(r"```(?:json)?", "", text).strip()
     try:
         return json.loads(text)
     except Exception:
         pass
-
     start = text.find("[")
     if start == -1:
         return []
-
     depth, end = 0, -1
     for i in range(start, len(text)):
         if text[i] == "[":    depth += 1
@@ -187,22 +108,18 @@ def extract_json(text: str) -> List[dict]:
             if depth == 0:
                 end = i + 1
                 break
-
     if end == -1:
         idx = text.rfind("]")
         end = idx + 1 if idx != -1 else -1
     if end == -1:
         return []
-
     candidate = text[start:end]
     try:
-        result = json.loads(candidate)
-        if isinstance(result, list):
-            return result
+        r = json.loads(candidate)
+        if isinstance(r, list):
+            return r
     except Exception:
         pass
-
-    # Partial recovery for truncated responses
     partial, depth, obj_start = [], 0, -1
     for i, ch in enumerate(candidate):
         if ch == "{":
@@ -251,17 +168,13 @@ def _normalize_correct(correct) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Error classification — drives split backoff (the key speed improvement)
+# Error classification + backoff
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _classify_error(exc: Exception) -> str:
-    """Return 'timeout' | 'rate_limit' | 'other'."""
-    if isinstance(exc, asyncio.TimeoutError):
+    if isinstance(exc, (asyncio.TimeoutError, asyncio.CancelledError)):
         return "timeout"
-    if isinstance(exc, asyncio.CancelledError):
-        return "timeout"
-    exc_name = type(exc).__name__
-    if "RateLimit" in exc_name:
+    if "RateLimit" in type(exc).__name__:
         return "rate_limit"
     status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
     if status == 429 or "429" in str(exc) or "rate limit" in str(exc).lower():
@@ -270,9 +183,7 @@ def _classify_error(exc: Exception) -> str:
 
 
 def _get_backoff(error_class: str, attempt: int, exc: Exception) -> float:
-    """Return seconds to sleep based on error class and attempt number."""
     if error_class == "rate_limit":
-        # Prefer server's retry-after header; fall back to our schedule
         headers   = getattr(getattr(exc, "response", None), "headers", {}) or {}
         retry_hdr = headers.get("retry-after")
         try:
@@ -285,7 +196,7 @@ def _get_backoff(error_class: str, attempt: int, exc: Exception) -> float:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Core LLM call — semaphore + per-call timeout + split backoff
+# Core LLM call
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _call_llm(
@@ -296,13 +207,6 @@ async def _call_llm(
     chunk_idx: int,
     topic: Optional[str] = None,
 ) -> List[dict]:
-    """
-    One chunk → one Groq call. Guarantees:
-      • Never hangs > LLM_CALL_TIMEOUT_S (55s)
-      • Semaphore released before sleep — others proceed during backoff
-      • Error-type-aware backoff: timeout→3s, rate_limit→62s, other→5s
-      • Always returns [] on exhaustion — never raises
-    """
     prompt    = build_prompt(chunk_text, num_questions, q_type, difficulty, topic)
     semaphore = _get_semaphore()
 
@@ -313,24 +217,17 @@ async def _call_llm(
 
         async with semaphore:
             try:
-                logger.info(
-                    f"[Chunk {chunk_idx}][{q_type}] attempt {attempt + 1}/{MAX_RETRIES + 1} "
-                    f"— {num_questions} questions"
-                )
+                logger.info(f"[Chunk {chunk_idx}][{q_type}] attempt {attempt + 1} — {num_questions}q")
                 response = await asyncio.wait_for(
                     asyncio.to_thread(
                         client.chat.completions.create,
                         model=MODEL_NAME,
                         messages=[
-                            {
-                                "role": "system",
-                                "content": (
-                                    "You are an expert quiz generator. "
-                                    "Respond ONLY with a valid JSON array starting with '[' and ending with ']'. "
-                                    "No markdown fences. No text outside the array. "
-                                    "Each answer option must be under 60 characters."
-                                ),
-                            },
+                            {"role": "system", "content": (
+                                "You are an expert quiz generator. "
+                                "Respond ONLY with a valid JSON array starting with '[' and ending with ']'. "
+                                "No markdown. No text outside the array. Options under 60 chars each."
+                            )},
                             {"role": "user", "content": prompt},
                         ],
                         temperature=0.4,
@@ -339,7 +236,6 @@ async def _call_llm(
                     timeout=LLM_CALL_TIMEOUT_S,
                 )
 
-                elapsed = time.monotonic() - t_start
                 content   = response.choices[0].message.content
                 questions = extract_json(content)
 
@@ -351,40 +247,158 @@ async def _call_llm(
                         q["correct"] = _normalize_correct(q["correct"])
                         valid.append(q)
 
-                logger.info(
-                    f"[Chunk {chunk_idx}][{q_type}] ✓ {len(valid)} questions in {elapsed:.1f}s"
-                )
+                logger.info(f"[Chunk {chunk_idx}][{q_type}] ✓ {len(valid)}q in {time.monotonic()-t_start:.1f}s")
                 succeeded = True
                 return valid
 
             except Exception as e:
-                elapsed   = time.monotonic() - t_start
                 last_exc  = e
                 err_class = _classify_error(e)
-                logger.warning(
-                    f"[Chunk {chunk_idx}][{q_type}] ✗ {err_class} after {elapsed:.1f}s "
-                    f"(attempt {attempt + 1}): {type(e).__name__}"
-                )
+                logger.warning(f"[Chunk {chunk_idx}][{q_type}] ✗ {err_class} after {time.monotonic()-t_start:.1f}s: {type(e).__name__}")
 
-        # Semaphore released — compute backoff and sleep outside it
         if attempt >= MAX_RETRIES or succeeded:
             break
-
         wait = _get_backoff(_classify_error(last_exc), attempt, last_exc)
-        logger.warning(
-            f"[Chunk {chunk_idx}][{q_type}] sleeping {wait}s before retry {attempt + 2}"
-        )
+        logger.warning(f"[Chunk {chunk_idx}][{q_type}] sleeping {wait}s before retry")
         await asyncio.sleep(wait)
 
     if not succeeded:
-        logger.error(
-            f"[Chunk {chunk_idx}][{q_type}] SKIPPED after {MAX_RETRIES + 1} attempts"
-        )
+        logger.error(f"[Chunk {chunk_idx}][{q_type}] SKIPPED after {MAX_RETRIES+1} attempts")
     return []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Fully-parallel gather (no sequential batch loop)
+# SSE-aware chunk runner (NEW in v6)
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _call_llm_queued(
+    chunk_text: str,
+    num_questions: int,
+    q_type: str,
+    difficulty: str,
+    chunk_idx: int,
+    topic: Optional[str],
+    progress_queue: asyncio.Queue,
+) -> List[dict]:
+    """
+    Wrapper around _call_llm that puts a progress update into progress_queue
+    as soon as this chunk's result is ready.
+
+    This is the key mechanism that keeps the SSE connection alive:
+    the endpoint reads from the queue and sends an SSE event for each
+    completed chunk. Each event is bytes on the wire, resetting Render's
+    30-second idle proxy timeout.
+    """
+    result = await _call_llm(chunk_text, num_questions, q_type, difficulty, chunk_idx, topic)
+    await progress_queue.put({
+        "event":     "chunk",
+        "chunk_idx": chunk_idx,
+        "q_type":    q_type,
+        "count":     len(result),
+        "questions": result,
+    })
+    return result
+
+
+async def _run_all_chunks_streaming(
+    chunks: List[str],
+    q_per_chunk: List[int],
+    q_type: str,
+    difficulty: str,
+    topic: Optional[str],
+    progress_queue: asyncio.Queue,
+) -> List[dict]:
+    """
+    Submit all chunks simultaneously. Each task puts its result into
+    progress_queue as soon as it finishes (no waiting for other tasks).
+    The semaphore inside _call_llm limits concurrency to MAX_PARALLEL.
+    """
+    tasks = [
+        _call_llm_queued(chunk, q_count, q_type, difficulty, idx, topic, progress_queue)
+        for idx, (chunk, q_count) in enumerate(zip(chunks, q_per_chunk))
+        if q_count > 0
+    ]
+
+    logger.info(f"[Pipeline][{q_type}] {len(tasks)} tasks — semaphore={MAX_PARALLEL}")
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    all_questions: List[dict] = []
+    for i, result in enumerate(results):
+        if isinstance(result, BaseException):
+            logger.error(f"[Chunk {i}][{q_type}] escaped gather: {result}")
+        elif isinstance(result, list):
+            all_questions.extend(result)
+
+    return all_questions
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public streaming API (used by /quiz/generate SSE endpoint)
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def generate_quiz_streaming(
+    text: str,
+    num_questions: int,
+    q_type: str,
+    difficulty: str,
+    topic: Optional[str],
+    progress_queue: asyncio.Queue,
+) -> List[dict]:
+    """
+    Generate MCQs and report progress via progress_queue.
+
+    The caller (streaming endpoint) reads from progress_queue and sends
+    SSE events. Each event keeps Render's proxy connection alive.
+
+    Sentinel: after all questions are ready, caller receives the full
+    question list as the return value of this coroutine.
+    """
+    types = [t.strip().upper() for t in q_type.split(",") if t.strip()]
+
+    async def _single_type(text: str, n: int, qt: str) -> List[dict]:
+        chunks = await asyncio.to_thread(chunk_text_list, text)
+        if not chunks:
+            return []
+        if len(chunks) == 1:
+            return await _call_llm_queued(chunks[0], n, qt, difficulty, 0, topic, progress_queue)
+        q_per_chunk   = distribute_questions(n, len(chunks))
+        all_questions = await _run_all_chunks_streaming(chunks, q_per_chunk, qt, difficulty, topic, progress_queue)
+        # Deduplicate
+        seen, deduped = set(), []
+        for q in all_questions:
+            key = q["question"].strip().lower()
+            if key not in seen:
+                seen.add(key)
+                deduped.append(q)
+        return deduped
+
+    if len(types) <= 1:
+        return await _single_type(text, num_questions, q_type.upper())
+
+    base   = num_questions // len(types)
+    extras = num_questions % len(types)
+    counts = [base + (1 if i < extras else 0) for i in range(len(types))]
+
+    type_tasks = [
+        _single_type(text, count, t)
+        for t, count in zip(types, counts)
+        if count > 0
+    ]
+
+    type_results = await asyncio.gather(*type_tasks, return_exceptions=True)
+
+    all_questions: List[dict] = []
+    for i, result in enumerate(type_results):
+        if isinstance(result, BaseException):
+            logger.error(f"[Type {types[i]}] pipeline failed: {result}")
+        else:
+            all_questions.extend(result)
+
+    return all_questions
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Non-streaming API (kept for compatibility)
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _run_all_chunks(
@@ -399,77 +413,14 @@ async def _run_all_chunks(
         for idx, (chunk, q_count) in enumerate(zip(chunks, q_per_chunk))
         if q_count > 0
     ]
-
-    logger.info(
-        f"[Pipeline][{q_type}] {len(tasks)} tasks submitted "
-        f"(semaphore={MAX_PARALLEL}, ~{len(tasks)//MAX_PARALLEL + 1} serial slots)"
-    )
-
     results = await asyncio.gather(*tasks, return_exceptions=True)
-
     all_questions: List[dict] = []
-    completed = failed = skipped = 0
     for i, result in enumerate(results):
         if isinstance(result, BaseException):
             logger.error(f"[Chunk {i}][{q_type}] escaped gather: {result}")
-            failed += 1
         elif isinstance(result, list):
-            if result:
-                all_questions.extend(result)
-                completed += 1
-            else:
-                skipped += 1
-
-    logger.info(
-        f"[Pipeline][{q_type}] done — completed={completed} "
-        f"skipped={skipped} failed={failed} questions={len(all_questions)}"
-    )
+            all_questions.extend(result)
     return all_questions
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Public API
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def _generate_single(
-    text: str,
-    num_questions: int,
-    q_type: str,
-    difficulty: str,
-    topic: Optional[str] = None,
-) -> List[dict]:
-    t0     = time.monotonic()
-    chunks = await asyncio.to_thread(chunk_text_list, text)
-
-    logger.info(
-        f"\n====== START {q_type}: {num_questions}q | {len(chunks)} chunks | "
-        f"topic={topic or 'all'} | ~{num_questions // max(len(chunks),1)}-"
-        f"{(num_questions // max(len(chunks),1)) + 1} q/chunk ======"
-    )
-
-    if not chunks:
-        return []
-
-    if len(chunks) == 1:
-        return await _call_llm(chunks[0], num_questions, q_type, difficulty, 0, topic)
-
-    q_per_chunk   = distribute_questions(num_questions, len(chunks))
-    all_questions = await _run_all_chunks(chunks, q_per_chunk, q_type, difficulty, topic)
-
-    # Deduplicate by normalised question text
-    seen: set       = set()
-    deduped: List[dict] = []
-    for q in all_questions:
-        key = q["question"].strip().lower()
-        if key not in seen:
-            seen.add(key)
-            deduped.append(q)
-
-    elapsed = time.monotonic() - t0
-    logger.info(
-        f"====== END {q_type}: {len(deduped)} unique questions in {elapsed:.1f}s ======\n"
-    )
-    return deduped
 
 
 async def generate_quiz_from_text(
@@ -479,37 +430,6 @@ async def generate_quiz_from_text(
     difficulty: str,
     topic: Optional[str] = None,
 ) -> List[dict]:
-    """
-    Public entry point. Comma-separated q_type supported ('MCQ,TF,FIB').
-    All types share the global semaphore — peak concurrency always ≤ MAX_PARALLEL=5.
-    """
-    t0    = time.monotonic()
-    types = [t.strip().upper() for t in q_type.split(",") if t.strip()]
-
-    if len(types) <= 1:
-        return await _generate_single(text, num_questions, q_type.upper(), difficulty, topic)
-
-    base   = num_questions // len(types)
-    extras = num_questions % len(types)
-    counts = [base + (1 if i < extras else 0) for i in range(len(types))]
-
-    type_tasks = [
-        _generate_single(text, count, t, difficulty, topic)
-        for t, count in zip(types, counts)
-        if count > 0
-    ]
-
-    type_results = await asyncio.gather(*type_tasks, return_exceptions=True)
-
-    all_questions: List[dict] = []
-    for i, result in enumerate(type_results):
-        if isinstance(result, BaseException):
-            logger.error(f"[Type {types[i]}] pipeline failed: {result}")
-        else:
-            all_questions.extend(result)
-
-    logger.info(
-        f"[generate_quiz_from_text] total={len(all_questions)} questions "
-        f"in {time.monotonic() - t0:.1f}s"
-    )
-    return all_questions
+    """Non-streaming version kept for backward compatibility."""
+    queue = asyncio.Queue()   # discard progress events
+    return await generate_quiz_streaming(text, num_questions, q_type, difficulty, topic, queue)
