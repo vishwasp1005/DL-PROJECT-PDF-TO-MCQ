@@ -1,15 +1,6 @@
 """
-db/models.py — SQLAlchemy Models (v3)
-======================================
-BUG FIXED: Missing `q_type` column on Question
+db/models.py — SQLAlchemy Models (final)
 
-  The LLM generates MCQ / TF / FIB question types. The old Question model had
-  no column to store the type. Every quiz saved to DB lost its type info.
-  GET /quiz/history returned questions with no type → TF and FIB questions
-  were rendered as broken MCQs in the frontend.
-
-  FIX: Added q_type = Column(String, default="MCQ") to Question.
-  Run `python migrate_db.py` once after deploying this change.
 """
 
 from sqlalchemy import Column, Integer, String, Float, ForeignKey, Text, DateTime, Boolean
@@ -18,6 +9,9 @@ from datetime import datetime
 from db.database import Base
 
 
+# =============================================================================
+# User
+# =============================================================================
 class User(Base):
     __tablename__ = "users"
 
@@ -29,6 +23,9 @@ class User(Base):
     refresh_tokens = relationship("RefreshToken", back_populates="user", cascade="all, delete-orphan")
 
 
+# =============================================================================
+# RefreshToken
+# =============================================================================
 class RefreshToken(Base):
     __tablename__ = "refresh_tokens"
 
@@ -42,6 +39,9 @@ class RefreshToken(Base):
     user = relationship("User", back_populates="refresh_tokens")
 
 
+# =============================================================================
+# QuizSession
+# =============================================================================
 class QuizSession(Base):
     __tablename__ = "quiz_sessions"
 
@@ -56,6 +56,9 @@ class QuizSession(Base):
     questions = relationship("Question", back_populates="quiz_session")
 
 
+# =============================================================================
+# Question — q_type column added
+# =============================================================================
 class Question(Base):
     __tablename__ = "questions"
 
@@ -65,7 +68,7 @@ class Question(Base):
     correct         = Column(String)
     topic           = Column(String)
     difficulty      = Column(String)
-    q_type          = Column(String, default="MCQ")   # FIX: was missing — type lost on save
+    q_type          = Column(String, default="MCQ")   # NEW: persists MCQ / TF / FIB
     quiz_session_id = Column(Integer, ForeignKey("quiz_sessions.id"))
 
     quiz_session = relationship("QuizSession", back_populates="questions")
