@@ -1,5 +1,6 @@
 """
 core/generator.py — SSE-Streaming MCQ Generator (v6)
+======================================================
 """
 
 import json
