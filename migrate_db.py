@@ -1,6 +1,5 @@
 """
 migrate_db.py — Database migration script (final)
-
 """
 
 import sqlite3
