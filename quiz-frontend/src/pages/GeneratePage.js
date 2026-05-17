@@ -1,4 +1,6 @@
-
+/**
+ * GeneratePage.js (v6 — save-stable)
+ */
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { generateQuiz, analyzePDF } from "../services/quizService";
@@ -43,7 +45,7 @@ export default function GeneratePage() {
     const [uploadPct,     setUploadPct]     = useState(0);
     const [progress,      setProgress]      = useState(0);
     const [genPhase,      setGenPhase]      = useState(0);
-    const [genPhaseLabel, setGenPhaseLabel] = useState("");   // NEW: real chunk progress text
+    const [genPhaseLabel, setGenPhaseLabel] = useState("");
     const [error,         setError]         = useState("");
     const [generated,     setGenerated]     = useState(null);
     const [detailedExp,   setDetailedExp]   = useState(saved?.detailedExp ?? true);
@@ -120,13 +122,11 @@ export default function GeneratePage() {
         setUploadPct(0); setGenPhaseLabel("");
         clearAllTimers();
 
-        // ── Phase 1 + 2: fast phases (parse + chunk) — still timer-based ────
-        // These complete in <2 seconds on the backend. We animate them locally.
         const runFastPhase = (from, to, phase, durationMs) => {
             setGenPhase(phase);
-            const steps = Math.ceil((to - from) / 3);
+            const steps    = Math.ceil((to - from) / 3);
             const interval = Math.max(50, Math.floor(durationMs / steps));
-            let current = from;
+            let current    = from;
             const id = setInterval(() => {
                 current = Math.min(current + 3, to);
                 setProgress(current);
@@ -135,18 +135,16 @@ export default function GeneratePage() {
             timerRefs.current.add(id);
         };
 
-        runFastPhase(5, 20, 1, 800);
-        const t1 = setTimeout(() => runFastPhase(20, 35, 2, 600), 900);
-        const t2 = setTimeout(() => {
+        const startAIPhase = () => {
             setGenPhase(3);
             setGenPhaseLabel("Waiting for first chunk…");
-        }, 1600);
+        };
+
+        runFastPhase(5, 20, 1, 800);
+        const t1 = setTimeout(() => runFastPhase(20, 35, 2, 600), 900);
+        const t2 = setTimeout(() => startAIPhase(), 1600);
         timerRefs.current.add(t1); timerRefs.current.add(t2);
 
-        // ── onChunk: called by quizService for each SSE chunk event ──────────
-        // This is the key change from v4. Progress is now driven by real data.
-        // Formula: 35% (after phases 1+2) + (done/of) * 55% = 35–90%
-        // The final 10% (90→100%) is set in the success handler.
         const onChunk = ({ done, of, count, q_type }) => {
             const realProgress = Math.round(35 + (done / of) * 55);
             setProgress(Math.min(realProgress, 90));
@@ -160,36 +158,35 @@ export default function GeneratePage() {
                 onUploadProgress: ({ loaded, total }) => {
                     if (total) setUploadPct(Math.round((loaded / total) * 100));
                 },
-                onChunk,   // NEW: real SSE progress callback
+                onChunk,
             });
 
             clearAllTimers(); setProgress(100); setGenPhase(4); setGenPhaseLabel("");
 
             const questions     = data.questions || [];
             const quizSessionId = data.quiz_session_id;
+            const skipped       = data.skipped || 0;
+
             localStorage.setItem("qg_questions",  JSON.stringify(questions));
             localStorage.setItem("qg_session_id", String(quizSessionId));
             localStorage.setItem("qg_pdf_name",   file.name);
-            setGenerated({ questions, quizSessionId, pdfName: file.name });
-            setToast(`✅ ${questions.length} questions generated! Head to Study Mode to begin.`);
-            timerRefs.current.add(setTimeout(() => setToast(""), 5000));
+
+            setGenerated({ questions, quizSessionId, pdfName: file.name, skipped });
+
+            const msg = skipped > 0
+                ? `✅ ${questions.length} questions saved (${skipped} skipped due to formatting). Head to Study Mode!`
+                : `✅ ${questions.length} questions generated! Head to Study Mode to begin.`;
+            setToast(msg);
+            timerRefs.current.add(setTimeout(() => setToast(""), 6000));
 
         } catch (e) {
             clearAllTimers();
             const status = e.response?.status;
             if (status === 401) return;
-            const userMsg = e.userMessage;
-            const detail  = e.response?.data?.detail;
-            setError(
-                userMsg                              ? userMsg :
-                detail && detail !== "Invalid token" ? detail :
-                status === 422 ? "Invalid request — check your file or settings." :
-                status === 413 ? "PDF too large. Try a smaller file (max 20 MB)." :
-                status === 429 ? "AI rate limit reached. Please wait 30 seconds and retry." :
-                status === 503 ? "AI service temporarily unavailable. Please retry in a moment." :
-                status === 504 ? "Generation timed out. Try fewer questions or a smaller PDF." :
-                                 "Generation failed. Please try again."
-            );
+            // Show the real error message from the server (e.userMessage is set
+            // by quizService from the SSE "error" event or HTTP error detail)
+            setError(e.userMessage || e.message || "Generation failed. Please try again.");
+
         } finally {
             setUploadPct(0);
             timerRefs.current.add(setTimeout(() => { setLoading(false); setProgress(0); setGenPhase(0); setGenPhaseLabel(""); }, 600));
@@ -388,7 +385,6 @@ export default function GeneratePage() {
                                 <span style={{ animation: "spin .8s linear infinite", display: "inline-block", fontSize: "1rem" }}>⚙</span>
                                 {genPhase === 1 && "Parsing PDF content…"}
                                 {genPhase === 2 && "Splitting into chunks…"}
-                                {/* Phase 3: show real chunk progress label when available */}
                                 {genPhase === 3 && (genPhaseLabel || "AI generating questions…")}
                                 {genPhase === 4 && "Saving to your library…"}
                                 {genPhase === 0 && "Initialising…"}
@@ -431,14 +427,22 @@ export default function GeneratePage() {
                 )}
 
                 {generated && (
-                    <div className="card" style={{ marginTop: "1.5rem", border: "1.5px solid var(--success)" }}>
-                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "1rem" }}>
+                    <div className="card" style={{ marginTop: "1.5rem", border: `1.5px solid ${generated.skipped > 0 ? "var(--warning)" : "var(--success)"}` }}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: generated.skipped > 0 ? ".5rem" : "1rem" }}>
                             <div>
-                                <div style={{ fontWeight: 700, color: "var(--navy)", fontSize: "1rem" }}>✅ {generated.questions.length} Questions Generated</div>
+                                <div style={{ fontWeight: 700, color: "var(--navy)", fontSize: "1rem" }}>
+                                    {generated.skipped > 0 ? "⚠️" : "✅"} {generated.questions.length} Questions Generated
+                                </div>
                                 <div style={{ fontSize: ".8rem", color: "var(--text-muted)", marginTop: ".125rem" }}>Ready — head to Study Mode to begin!</div>
                             </div>
-                            <div className="badge badge-success">Ready</div>
+                            <div className={`badge ${generated.skipped > 0 ? "badge-warning" : "badge-success"}`}>Ready</div>
                         </div>
+                        {/* Skipped questions warning */}
+                        {generated.skipped > 0 && (
+                            <div style={{ fontSize: ".75rem", color: "var(--warning)", background: "var(--warning-bg)", borderRadius: "6px", padding: ".5rem .75rem", marginBottom: ".875rem" }}>
+                                {generated.skipped} question{generated.skipped > 1 ? "s were" : " was"} skipped due to formatting issues in the AI output. The rest are ready to use.
+                            </div>
+                        )}
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: ".625rem" }}>
                             <button className="btn btn-primary" onClick={() => goTo("/study")}>📚 Study Mode</button>
                             <button className="btn btn-outline" onClick={() => { setGenerated(null); setFile(null); setWordCount(null); setCharCount(null); setDetectedDiff(null); setTopics([]); }}>🔄 Regenerate</button>
