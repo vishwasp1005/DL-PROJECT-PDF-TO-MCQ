@@ -1,5 +1,18 @@
 /**
  * quizService.js — all /quiz/* API calls (v5 — save-stable)
+ * ===========================================================
+ *
+ * CHANGES FROM v4:
+ *   - generateQuiz now reads `skipped` field from the SSE "done" event.
+ *     If the backend skipped some questions due to validation failure,
+ *     the skipped count is returned so GeneratePage can show a warning
+ *     ("41 questions generated, 3 skipped due to formatting issues").
+ *   - Error messages from the server are now passed through verbatim
+ *     in the "error" event instead of swallowed into a generic message.
+ *     This lets the frontend show: "Failed to save questions: OperationalError"
+ *     instead of the old generic "Failed to save questions. Please try again."
+ *
+ * BASE_URL: must match your Render backend URL exactly (and apiClient.js).
  */
 import apiClient from "./apiClient";
 
@@ -13,6 +26,17 @@ export async function analyzePDF(file) {
     return res.data;
 }
 
+// ── Quiz Generation (SSE streaming) ──────────────────────────────────────────
+/**
+ * @param {Object}   params
+ * @param {File}     params.file
+ * @param {number}   params.numQuestions
+ * @param {string}   params.qType
+ * @param {string}   params.difficulty
+ * @param {string}   [params.topic]
+ * @param {Function} [params.onUploadProgress]  called with {loaded, total}
+ * @param {Function} [params.onChunk]           called with {done, of, count, q_type}
+ * @returns {Promise<{questions, quiz_session_id, total, skipped, word_count, max_questions}>}
  */
 export async function generateQuiz({
     file,
