@@ -1,5 +1,14 @@
 /**
  * GeneratePage.js (v6 — save-stable)
+ * ====================================
+ *
+ * CHANGES FROM v5:
+ *   1. Reads `skipped` from the done event — shows a yellow warning banner
+ *      "41 questions saved, 3 skipped due to formatting issues" when the
+ *      backend had to skip some malformed LLM outputs during validation.
+ *   2. Error messages from the server are shown verbatim (via e.userMessage)
+ *      so the user sees the actual failure reason, not a generic string.
+ *   3. Generated success card shows skipped count if > 0.
  */
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
