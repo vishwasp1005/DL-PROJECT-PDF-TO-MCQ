@@ -1,4 +1,6 @@
-
+/**
+ * quizService.js — all /quiz/* API calls (v5 — save-stable)
+ */
 import apiClient from "./apiClient";
 
 const BASE_URL = "https://dl-project-pdf-to-mcq.onrender.com";
@@ -10,6 +12,8 @@ export async function analyzePDF(file) {
     const res = await apiClient.post("/quiz/analyze", form, { timeout: 30_000 });
     return res.data;
 }
+
+ */
 export async function generateQuiz({
     file,
     numQuestions,
@@ -26,7 +30,7 @@ export async function generateQuiz({
     const form  = new FormData();
     form.append("file", file);
 
-    // Simulate upload progress (fetch has no native onUploadProgress).
+    // Simulate upload progress
     let uploadDone = false;
     if (onUploadProgress) {
         let pct = 0;
@@ -102,7 +106,7 @@ export async function generateQuiz({
             buffer = events.pop();
 
             for (const rawEvent of events) {
-                if (rawEvent.trim().startsWith(":")) continue;   // heartbeat comment
+                if (rawEvent.trim().startsWith(":")) continue;   // heartbeat
 
                 const dataLine = rawEvent.split("\n").find(l => l.startsWith("data: "));
                 if (!dataLine) continue;
@@ -114,7 +118,12 @@ export async function generateQuiz({
                 if (data.event === "start")  continue;
 
                 if (data.event === "chunk") {
-                    if (onChunk) onChunk({ done: data.done, of: data.of, count: data.count, q_type: data.q_type });
+                    if (onChunk) onChunk({
+                        done:   data.done,
+                        of:     data.of,
+                        count:  data.count,
+                        q_type: data.q_type,
+                    });
                     continue;
                 }
 
@@ -123,6 +132,7 @@ export async function generateQuiz({
                         questions:       data.questions,
                         quiz_session_id: data.quiz_session_id,
                         total:           data.total,
+                        skipped:         data.skipped || 0,   // NEW: validation skips
                         word_count:      data.word_count,
                         max_questions:   data.max_questions,
                     };
@@ -130,6 +140,8 @@ export async function generateQuiz({
                 }
 
                 if (data.event === "error") {
+                    // Pass the server's message through verbatim so the user
+                    // sees the real error instead of a generic message.
                     const err = new Error(data.message || "Generation failed.");
                     err.userMessage = err.message;
                     throw err;
