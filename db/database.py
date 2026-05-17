@@ -1,6 +1,5 @@
 """
 db/database.py — SQLAlchemy Engine + Session (final)
-
 """
 
 from sqlalchemy import create_engine, event
