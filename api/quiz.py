@@ -1,65 +1,6 @@
 """
 api/quiz.py — Quiz API Router (v5 — save-stable)
-==================================================
 
-ROOT CAUSES OF "Failed to save questions" — ALL FIXED HERE
-────────────────────────────────────────────────────────────
-
-BUG 1 — CRITICAL (PRIMARY CAUSE): Depends(get_db) session closed before
-  the streaming generator saves to the database.
-
-  FastAPI's Depends lifecycle:
-    1. Request arrives → FastAPI resolves Depends(get_db) → opens db session
-    2. Endpoint function runs → returns StreamingResponse(event_stream())
-    3. FastAPI sees the return value → IMMEDIATELY runs Depends cleanup
-       → get_db()'s finally block calls db.close()
-    4. 30–90 seconds later: event_stream() finishes generation and tries
-       db.add(quiz_session) on the NOW-CLOSED session → OperationalError
-    5. except Exception as db_exc catches it → yields error SSE event
-    6. Frontend shows: "Failed to save questions. Please try again."
-
-  This is a documented FastAPI issue with Depends + StreamingResponse:
-  github.com/tiangolo/fastapi/issues/4719
-
-  FIX: Remove db from endpoint signature entirely. Create a fresh
-  SessionLocal() INSIDE event_stream() at the point of use. The session
-  is created, used, and closed all within the generator's save block —
-  no lifecycle dependency on the outer request.
-
-BUG 2: One db.commit() per question — N synchronous disk writes on event loop
-  For 100 MCQs: 100 × (db.add + db.commit + db.refresh) on the asyncio
-  event loop thread. Each commit() is a synchronous fsync. This blocks
-  the event loop and makes the SSE heartbeat stop firing, potentially
-  causing Render's nginx to time out the connection while saving.
-
-  FIX: Collect all Question objects, db.add_all(), ONE db.commit(),
-  then query back with a single SELECT to get the assigned IDs.
-  All of this runs in asyncio.to_thread() so the event loop stays free.
-
-BUG 3: No per-question validation — one bad LLM output crashes entire save
-  Accessing q["question"], q["options"], q["correct"] without try/except
-  means a single KeyError or TypeError from a malformed LLM response
-  crashes the loop. All questions are lost.
-
-  FIX: _validate_question() runs on every question before save.
-  Invalid questions are skipped and logged. Valid ones proceed.
-  Save never fails due to a single bad question.
-
-BUG 4: QuizSession committed before questions — failed saves leave orphans
-  quiz_session was committed to DB (getting an id) before the question
-  loop. If the loop then failed, an empty QuizSession remained in the DB.
-  On retry, another empty session was created.
-
-  FIX: Build all Question objects in memory first. Only commit
-  quiz_session + all questions in a SINGLE transaction. If anything
-  fails, nothing is committed. No orphan sessions.
-
-BUG 5: correct field not re-normalised before DB save
-  After deduplication across chunks, some questions may have correct
-  values like "A) option text" instead of just "A". Stored as-is,
-  quiz logic broke when comparing user answers to the stored correct value.
-
-  FIX: _normalize_correct() applied to every question in _validate_question().
 """
 
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
