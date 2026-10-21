@@ -7,7 +7,7 @@ const TECH = [
     { icon: "🐍", name: "FastAPI", desc: "High-performance Python API" },
     { icon: "🤖", name: "Groq LLaMA 3", desc: "AI question generation" },
     { icon: "🗄️", name: "SQLite", desc: "Lightweight database" },
-    { icon: "📄", name: "PyPDF2", desc: "PDF text extraction" },
+    { icon: "📄", name: "PyMuPdf", desc: "PDF text extraction" },
     { icon: "🔒", name: "JWT Auth", desc: "Secure authentication" },
 ];
 
