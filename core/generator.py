@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
-MODEL_NAME         = "openai/gpt-oss-120b"
+MODEL_NAME         = "qwen/qwen3.8-27b"
 MAX_PARALLEL       = 5
 MAX_RETRIES        = 2
 LLM_CALL_TIMEOUT_S = 55
