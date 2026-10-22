@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
-MODEL_NAME         = "meta-llama/llama-prompt-guard-2-86m"
+MODEL_NAME         = "qwen/qwen3.8-27b"
 MAX_PARALLEL       = 5
 MAX_RETRIES        = 2
 LLM_CALL_TIMEOUT_S = 55
